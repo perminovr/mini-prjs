@@ -1,0 +1,785 @@
+diff --git a/src/iec61850/client/ied_connection.c b/src/iec61850/client/ied_connection.c
+index 846570a..4abe34a 100644
+--- a/src/iec61850/client/ied_connection.c
++++ b/src/iec61850/client/ied_connection.c
+@@ -33,7 +33,6 @@
+ 
+ #define DEFAULT_CONNECTION_TIMEOUT 10000
+ #define DATA_SET_MAX_NAME_LENGTH 64 /* is 32 according to standard! */
+-#define OUTSTANDING_CALLS 12
+ 
+ typedef struct sICLogicalDevice
+ {
+@@ -556,13 +555,15 @@ static void
+ mmsConnectionStateChangedHandler(MmsConnection connection, void* parameter, MmsConnectionState newState)
+ {
+     IedConnection self = (IedConnection) parameter;
+-
++    
+     if (newState == MMS_CONNECTION_STATE_CONNECTED) {
+         IedConnection_setState(self, IED_STATE_CONNECTED);
++        if (self->connectionConnectedHandler != NULL)
++            self->connectionConnectedHandler(self->connectionReconnectParameter, self);
+     }
+     else if (newState == MMS_CONNECTION_STATE_CLOSED) {
+         IedConnection_setState(self, IED_STATE_CLOSED);
+-
++        
+         if (self->connectionCloseHandler != NULL)
+             self->connectionCloseHandler(self->connectionClosedParameter, self);
+ 
+@@ -575,6 +576,10 @@ mmsConnectionStateChangedHandler(MmsConnection connection, void* parameter, MmsC
+     else if (newState == MMS_CONNECTION_STATE_CONNECTING) {
+         IedConnection_setState(self, IED_STATE_CONNECTING);
+     }
++    else if (newState == MMS_CONNECTION_STATE_RECONNECT) {
++        if (self->connectionReconnectHandler != NULL)
++            self->connectionReconnectHandler(self->connectionReconnectParameter, self);
++    }     
+ }
+ 
+ static IedConnection
+@@ -641,6 +646,14 @@ IedConnection_setConnectTimeout(IedConnection self, uint32_t timeoutInMs)
+     self->connectionTimeout = timeoutInMs;
+ }
+ 
++void
++IedConnection_setKeepAliveParams(IedConnection self, int idle, int cnt, int interval)
++{
++    self->tcpKA_idle = idle;
++    self->tcpKA_cnt = cnt;
++    self->tcpKA_interval = interval;
++}
++
+ void
+ IedConnection_setRequestTimeout(IedConnection self, uint32_t timeoutInMs)
+ {
+@@ -679,6 +692,22 @@ IedConnection_installConnectionClosedHandler(IedConnection self, IedConnectionCl
+     self->connectionClosedParameter = parameter;
+ }
+ 
++void
++IedConnection_installConnectionConnectedHandler(IedConnection self, IedConnectionConnectedHandler handler,
++        void* parameter)
++{
++    self->connectionConnectedHandler = handler;
++    self->connectionConnectedParameter = parameter;
++}
++
++void
++IedConnection_installConnectionReconnectHandler(IedConnection self, IedConnectionReconnectHandler handler,
++        void* parameter)
++{
++    self->connectionReconnectHandler = handler;
++    self->connectionReconnectParameter = parameter;
++}
++
+ void
+ IedConnection_connect(IedConnection self, IedClientError* error, const char* hostname, int tcpPort)
+ {
+@@ -709,15 +738,16 @@ IedConnection_installStateChangedHandler(IedConnection self, IedConnection_State
+ }
+ 
+ void
+-IedConnection_connectAsync(IedConnection self, IedClientError* error, const char* hostname, int tcpPort)
++IedConnection_connectAsync(IedConnection self, IedClientError* error, const char *clientIp, int clientPort, const char* hostname, int tcpPort)
+ {
+     if (IedConnection_getState(self) != IED_STATE_CONNECTED) {
+ 
+         MmsError mmsError = MMS_ERROR_NONE;
+ 
+         MmsConnection_setConnectTimeout(self->connection, self->connectionTimeout);
++        MmsConnection_setKeepAliveParams(self->connection, self->tcpKA_idle, self->tcpKA_cnt, self->tcpKA_interval);
+ 
+-        MmsConnection_connectAsync(self->connection, &mmsError, hostname, tcpPort);
++        MmsConnection_connectAsync(self->connection, &mmsError, clientIp, clientPort, hostname, tcpPort);
+ 
+         *error = iedConnection_mapMmsErrorToIedError(mmsError);
+     }
+@@ -771,12 +801,12 @@ IedConnection_release(IedConnection self, IedClientError* error)
+ }
+ 
+ void
+-IedConnection_releaseAsync(IedConnection self, IedClientError* error)
++IedConnection_releaseAsync(IedConnection self, IedClientError* error, MmsConnection_ConcludeAbortHandler handler, void *parameter)
+ {
+     if (IedConnection_getState(self) == IED_STATE_CONNECTED) {
+         MmsError mmsError;
+ 
+-        MmsConnection_concludeAsync(self->connection, &mmsError, NULL, NULL);
++        MmsConnection_concludeAsync(self->connection, &mmsError, handler, parameter);
+ 
+         *error = iedConnection_mapMmsErrorToIedError(mmsError);
+     }
+diff --git a/src/iec61850/inc/iec61850_client.h b/src/iec61850/inc/iec61850_client.h
+index 4f3496f..bdcf3f9 100644
+--- a/src/iec61850/inc/iec61850_client.h
++++ b/src/iec61850/inc/iec61850_client.h
+@@ -244,6 +244,9 @@ IedConnection_destroy(IedConnection self);
+ LIB61850_API void
+ IedConnection_setConnectTimeout(IedConnection self, uint32_t timeoutInMs);
+ 
++LIB61850_API void
++IedConnection_setKeepAliveParams(IedConnection self, int idle, int cnt, int interval);
++
+ /**
+  * \brief set the request timeout in ms
+  *
+@@ -325,7 +328,9 @@ IedConnection_connect(IedConnection self, IedClientError* error, const char* hos
+  * \param tcpPort the TCP port number of the server to connect to
+  */
+ LIB61850_API void
+-IedConnection_connectAsync(IedConnection self, IedClientError* error, const char* hostname, int tcpPort);
++IedConnection_connectAsync(IedConnection self, IedClientError* error, 
++        const char *clientIp, int clientPort, 
++        const char* hostname, int tcpPort);
+ 
+ /**
+  * \brief Abort the connection
+@@ -386,7 +391,7 @@ IedConnection_release(IedConnection self, IedClientError* error);
+  * \param error the error code if an error occurs
+  */
+ LIB61850_API void
+-IedConnection_releaseAsync(IedConnection self, IedClientError* error);
++IedConnection_releaseAsync(IedConnection self, IedClientError* error, MmsConnection_ConcludeAbortHandler handler, void *parameter);
+ 
+ /**
+  * \brief Close the connection
+@@ -430,6 +435,10 @@ IedConnection_getLastApplError(IedConnection self);
+  */
+ typedef void
+ (*IedConnectionClosedHandler) (void* parameter, IedConnection connection);
++typedef void
++(*IedConnectionConnectedHandler) (void* parameter, IedConnection connection);
++typedef void
++(*IedConnectionReconnectHandler) (void* parameter, IedConnection connection);
+ 
+ /**
+  * \brief Install a handler function that is called when the connection is lost/closed.
+@@ -444,6 +453,13 @@ LIB61850_API void
+ IedConnection_installConnectionClosedHandler(IedConnection self, IedConnectionClosedHandler handler,
+         void* parameter);
+ 
++LIB61850_API void
++IedConnection_installConnectionConnectedHandler(IedConnection self, IedConnectionConnectedHandler handler,
++        void* parameter);
++
++LIB61850_API void
++IedConnection_installConnectionReconnectHandler(IedConnection self, IedConnectionReconnectHandler handler,
++        void* parameter);
+ /**
+  * \brief Callback handler that is invoked whenever the connection state (\ref IedConnectionState) changes
+  *
+diff --git a/src/iec61850/inc_private/ied_connection_private.h b/src/iec61850/inc_private/ied_connection_private.h
+index 3b061b5..e1bafaa 100644
+--- a/src/iec61850/inc_private/ied_connection_private.h
++++ b/src/iec61850/inc_private/ied_connection_private.h
+@@ -68,10 +68,19 @@ struct sIedConnection
+     IedConnectionClosedHandler connectionCloseHandler;
+     void* connectionClosedParameter;
+ 
++    IedConnectionConnectedHandler connectionConnectedHandler;
++    void* connectionConnectedParameter;
++
++    IedConnectionReconnectHandler connectionReconnectHandler;
++    void* connectionReconnectParameter;
++
+     IedConnection_StateChangedHandler connectionStateChangedHandler;
+     void* connectionStateChangedHandlerParameter;
+ 
+     uint32_t connectionTimeout;
++    int tcpKA_idle;
++    int tcpKA_cnt;
++    int tcpKA_interval;
+ };
+ 
+ struct sClientReportControlBlock {
+diff --git a/src/mms/inc/mms_client_connection.h b/src/mms/inc/mms_client_connection.h
+index 275ecf4..591b370 100644
+--- a/src/mms/inc/mms_client_connection.h
++++ b/src/mms/inc/mms_client_connection.h
+@@ -42,6 +42,10 @@ extern "C" {
+ #include "linked_list.h"
+ #include "tls_config.h"
+ 
++#ifndef OUTSTANDING_CALLS
++#define OUTSTANDING_CALLS 16
++#endif
++
+ /**
+  * Contains MMS layer specific parameters
+  */
+@@ -63,7 +67,8 @@ typedef enum {
+     MMS_CONNECTION_STATE_CLOSED,
+     MMS_CONNECTION_STATE_CONNECTING,
+     MMS_CONNECTION_STATE_CONNECTED,
+-    MMS_CONNECTION_STATE_CLOSING
++    MMS_CONNECTION_STATE_CLOSING,
++    MMS_CONNECTION_STATE_RECONNECT
+ } MmsConnectionState;
+ 
+ typedef void (*MmsInformationReportHandler) (void* parameter, char* domainName,
+@@ -179,6 +184,9 @@ MmsConnection_getRequestTimeout(MmsConnection self);
+ LIB61850_API void
+ MmsConnection_setConnectTimeout(MmsConnection self, uint32_t timeoutInMs);
+ 
++LIB61850_API void
++MmsConnection_setKeepAliveParams(MmsConnection self, int idle, int cnt, int interval);
++
+ /**
+  * \brief Install a handler function for MMS information reports (unsolicited messages from the server).
+  *
+@@ -272,7 +280,9 @@ LIB61850_API bool
+ MmsConnection_connect(MmsConnection self, MmsError* mmsError, const char* serverName, int serverPort);
+ 
+ LIB61850_API void
+-MmsConnection_connectAsync(MmsConnection self, MmsError* mmsError, const char* serverName, int serverPort);
++MmsConnection_connectAsync(MmsConnection self, MmsError* mmsError, 
++        const char *clientIp, int clientPort, 
++        const char* serverName, int serverPort);
+ 
+ /**
+  * \brief Call MmsConnection state machine and connection handling code (for non-threaded mode only)
+diff --git a/src/mms/inc_private/iso_client_connection.h b/src/mms/inc_private/iso_client_connection.h
+index 1925cd2..8fda264 100644
+--- a/src/mms/inc_private/iso_client_connection.h
++++ b/src/mms/inc_private/iso_client_connection.h
+@@ -41,7 +41,8 @@ typedef enum
+     ISO_IND_ASSOCIATION_FAILED,
+     ISO_IND_CLOSED,
+     ISO_IND_DATA,
+-    ISO_IND_TICK
++    ISO_IND_TICK,
++    ISO_IND_RECONNECT
+ } IsoIndication;
+ 
+ typedef void*
+@@ -61,6 +62,15 @@ IsoClientConnection_destroy(IsoClientConnection self);
+ LIB61850_INTERNAL bool
+ IsoClientConnection_associateAsync(IsoClientConnection self, uint32_t connectTimeoutInMs, uint32_t readTimeoutInMs);
+ 
++LIB61850_INTERNAL void
++IsoClientConnection_setSockParams(IsoClientConnection self, const char *clientIp, uint16_t clientPort);
++
++LIB61850_INTERNAL void
++IsoClientConnection_setKeepAliveParams(IsoClientConnection self, int idle, int cnt, int interval);
++
++LIB61850_INTERNAL void
++IsoClientConnection_setReconnectBehavior(IsoClientConnection self, int isNeedToReconnect);
++
+ /**
+  * called by tick function
+  *
+@@ -77,7 +87,7 @@ IsoClientConnection_associate(IsoClientConnection self, uint32_t connectTimeoutI
+  *
+  * \param payload message to send
+  */
+-LIB61850_INTERNAL void
++LIB61850_INTERNAL int
+ IsoClientConnection_sendMessage(IsoClientConnection self, ByteBuffer* payload);
+ 
+ LIB61850_INTERNAL void
+diff --git a/src/mms/inc_private/mms_client_internal.h b/src/mms/inc_private/mms_client_internal.h
+index 337fe83..9e9018f 100644
+--- a/src/mms/inc_private/mms_client_internal.h
++++ b/src/mms/inc_private/mms_client_internal.h
+@@ -98,6 +98,9 @@ struct sMmsConnection {
+ 
+     uint32_t requestTimeout;
+     uint32_t connectTimeout;
++    int tcpKA_idle;
++    int tcpKA_cnt;
++    int tcpKA_interval;
+ 
+     IsoClientConnection isoClient;
+ 
+diff --git a/src/mms/iso_client/iso_client_connection.c b/src/mms/iso_client/iso_client_connection.c
+index 7f12051..a3bcc11 100644
+--- a/src/mms/iso_client/iso_client_connection.c
++++ b/src/mms/iso_client/iso_client_connection.c
+@@ -79,6 +79,14 @@ struct sIsoClientConnection
+ 
+     uint32_t readTimeoutInMs; /* read timeout in ms */
+     uint64_t nextReadTimeout; /* timeout value for read and connect */
++    uint64_t connectTimeout;
++    int tcpKA_idle;
++    int tcpKA_cnt;
++    int tcpKA_interval;
++    const char *clientIp;
++    uint16_t clientPort;
++
++    int isNeedToReconnect;
+ 
+     Socket socket;
+ 
+@@ -292,6 +300,32 @@ releaseSocket(IsoClientConnection self)
+     }
+ }
+ 
++void
++IsoClientConnection_setReconnectBehavior(IsoClientConnection self, int isNeedToReconnect)
++{
++    self->isNeedToReconnect = isNeedToReconnect;
++}
++
++static int reconnect(IsoClientConnection self)
++{
++    Semaphore_post(self->tickMutex); // after reconnect return from tick
++    IsoClientConnection_releaseTransmitBuffer(self);
++    setState(self, STATE_IDLE);
++    setIntState(self, INT_STATE_IDLE);
++    self->callback(self->isNeedToReconnect? ISO_IND_RECONNECT : ISO_IND_CLOSED, self->callbackParameter, NULL);
++    return self->isNeedToReconnect;
++
++    // if (self->isNeedToReconnect) {
++    //     Semaphore_post(self->tickMutex); // after reconnect return from tick
++    //     IsoClientConnection_releaseTransmitBuffer(self);
++    //     setState(self, STATE_IDLE);
++    //     setIntState(self, INT_STATE_IDLE);
++    //     self->callback(ISO_IND_RECONNECT, self->callbackParameter, NULL);
++    //     return 1;
++    // }
++    // return 0;
++}
++
+ /*
+  * Connection state machine
+  *
+@@ -325,33 +359,21 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                 if (sendConnectionRequestMessage(self)) {
+                     self->nextReadTimeout = Hal_getTimeInMs() + self->readTimeoutInMs;
+                     nextState = INT_STATE_WAIT_FOR_COTP_CONNECT_RESP;
+-                }
+-                else {
+-                    IsoClientConnection_releaseTransmitBuffer(self);
+-                    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+-                    nextState = INT_STATE_CLOSE_ON_ERROR;
++                    break;
+                 }
+             }
+-            else if (socketState == SOCKET_STATE_FAILED) {
+-                IsoClientConnection_releaseTransmitBuffer(self);
+-                self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+-                nextState = INT_STATE_CLOSE_ON_ERROR;
+-            }
+-            else {
+ 
+-                /* check connect timeout */
++            /* check connect timeout */
+ 
+-                uint64_t currentTime = Hal_getTimeInMs();
+-
+-                if (currentTime > self->nextReadTimeout) {
+-                    IsoClientConnection_releaseTransmitBuffer(self);
+-                    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+-                    nextState = INT_STATE_CLOSE_ON_ERROR;
+-                }
+-                else {
+-                    waits = true;
+-                }
++            uint64_t currentTime = Hal_getTimeInMs();
+ 
++            if (currentTime > self->nextReadTimeout) {
++                // IsoClientConnection_releaseTransmitBuffer(self);
++                // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                nextState = INT_STATE_CLOSE_ON_ERROR;
++            }
++            else {
++                waits = true;
+             }
+ 
+         }
+@@ -366,9 +388,9 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                 if (DEBUG_ISO_CLIENT)
+                     printf("Timeout waiting for COTP CR\n");
+ 
+-                IsoClientConnection_releaseTransmitBuffer(self);
++                // IsoClientConnection_releaseTransmitBuffer(self);
+ 
+-                self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                 nextState = INT_STATE_CLOSE_ON_ERROR;
+             }
+@@ -384,9 +406,9 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                         if (DEBUG_ISO_CLIENT)
+                             printf("Unexpected COTP state (%i)\n", cotpIndication);
+ 
+-                        IsoClientConnection_releaseTransmitBuffer(self);
++                        // IsoClientConnection_releaseTransmitBuffer(self);
+ 
+-                        self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                        // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                         nextState = INT_STATE_CLOSE_ON_ERROR;
+                     }
+@@ -402,9 +424,9 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                     if (DEBUG_ISO_CLIENT)
+                         printf("Error receiving COTP message\n");
+ 
+-                    IsoClientConnection_releaseTransmitBuffer(self);
++                    // IsoClientConnection_releaseTransmitBuffer(self);
+ 
+-                    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                    // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                     nextState = INT_STATE_CLOSE_ON_ERROR;
+                 }
+@@ -425,7 +447,7 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                 if (DEBUG_ISO_CLIENT)
+                     printf("Timeout waiting for ACSE initiate response\n");
+ 
+-                self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                 nextState = INT_STATE_CLOSE_ON_ERROR;
+             }
+@@ -441,7 +463,7 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                         if (DEBUG_ISO_CLIENT)
+                             printf("Unexpected COTP state (%i)\n", cotpIndication);
+ 
+-                        self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                        // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                         nextState = INT_STATE_CLOSE_ON_ERROR;
+                     }
+@@ -458,7 +480,7 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                            if (DEBUG_ISO_CLIENT)
+                                printf("IsoClientConnection_associate: no session connect indication\n");
+ 
+-                           self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                        //    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                            nextState = INT_STATE_CLOSE_ON_ERROR;
+                        }
+@@ -469,7 +491,7 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                                if (DEBUG_ISO_CLIENT)
+                                    printf("IsoClientConnection_associate: no presentation ok indication\n");
+ 
+-                               self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                            //    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                                nextState = INT_STATE_CLOSE_ON_ERROR;
+                            }
+@@ -481,7 +503,7 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                                    if (DEBUG_ISO_CLIENT)
+                                        printf("IsoClientConnection_associate: no ACSE_ASSOCIATE indication\n");
+ 
+-                                   self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                                //    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                                    nextState = INT_STATE_CLOSE_ON_ERROR;
+                                }
+@@ -507,7 +529,7 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+                     if (DEBUG_ISO_CLIENT)
+                         printf("Error receiving COTP message\n");
+ 
+-                    self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
++                    // self->callback(ISO_IND_ASSOCIATION_FAILED, self->callbackParameter, NULL);
+ 
+                     nextState = INT_STATE_CLOSE_ON_ERROR;
+                 }
+@@ -593,25 +615,27 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+ 
+     case INT_STATE_CLOSE_ON_ERROR:
+         {
+-            setState(self, STATE_ERROR);
+-
+-            self->callback(ISO_IND_CLOSED, self->callbackParameter, NULL);;
+-
+-            releaseSocket(self);
+-
+-            nextState = INT_STATE_ERROR;
++            if (reconnect(self)) {
++                return false;
++            } else {
++                setState(self, STATE_ERROR);
++                self->callback(ISO_IND_CLOSED, self->callbackParameter, NULL);
++                releaseSocket(self);
++                nextState = INT_STATE_ERROR;
++            }
+         }
+         break;
+ 
+     case INT_STATE_CLOSING_CONNECTION:
+         {
+-            setState(self, STATE_IDLE);
+-
+-            self->callback(ISO_IND_CLOSED, self->callbackParameter, NULL);;
+-
+-            releaseSocket(self);
+-
+-            nextState = INT_STATE_IDLE;
++            if (reconnect(self)) {
++                return false;
++            } else {
++                setState(self, STATE_IDLE);
++                self->callback(ISO_IND_CLOSED, self->callbackParameter, NULL);
++                releaseSocket(self);
++                nextState = INT_STATE_IDLE;
++            }
+         }
+         break;
+ 
+@@ -633,6 +657,20 @@ IsoClientConnection_handleConnection(IsoClientConnection self)
+     return waits;
+ }
+ 
++void
++IsoClientConnection_setKeepAliveParams(IsoClientConnection self, int idle, int cnt, int interval)
++{
++    self->tcpKA_idle = idle;
++    self->tcpKA_cnt = cnt;
++    self->tcpKA_interval = interval;
++}
++
++void
++IsoClientConnection_setSockParams(IsoClientConnection self, const char *clientIp, uint16_t clientPort)
++{
++    self->clientIp = clientIp;
++    self->clientPort = clientPort;
++}
+ 
+ bool
+ IsoClientConnection_associateAsync(IsoClientConnection self, uint32_t connectTimeoutInMs, uint32_t readTimeoutInMs)
+@@ -641,7 +679,10 @@ IsoClientConnection_associateAsync(IsoClientConnection self, uint32_t connectTim
+ 
+     /* Create socket and start connect */
+ 
+-    self->socket = TcpSocket_create();
++    if (self->socket)
++        Socket_destroy(self->socket);
++
++    self->socket = TcpSocket_createAndBind(self->clientIp, self->clientPort);
+ 
+     if (self->socket == NULL) {
+         Semaphore_post(self->tickMutex);
+@@ -654,6 +695,12 @@ IsoClientConnection_associateAsync(IsoClientConnection self, uint32_t connectTim
+     setIntState(self, INT_STATE_TCP_CONNECTING);
+ 
+ #if (CONFIG_ACTIVATE_TCP_KEEPALIVE == 1)
++    if (self->tcpKA_idle == 0)
++        self->tcpKA_idle = CONFIG_TCP_KEEPALIVE_IDLE;
++    if (self->tcpKA_interval == 0)
++        self->tcpKA_interval = CONFIG_TCP_KEEPALIVE_INTERVAL;
++    if (self->tcpKA_cnt == 0)
++        self->tcpKA_cnt = CONFIG_TCP_KEEPALIVE_CNT;
+     Socket_activateTcpKeepAlive(self->socket,
+             CONFIG_TCP_KEEPALIVE_IDLE,
+             CONFIG_TCP_KEEPALIVE_INTERVAL,
+@@ -664,7 +711,8 @@ IsoClientConnection_associateAsync(IsoClientConnection self, uint32_t connectTim
+     self->readTimeoutInMs = readTimeoutInMs;
+ 
+     /* set timeout for connect */
+-    self->nextReadTimeout = Hal_getTimeInMs() + connectTimeoutInMs;
++    self->connectTimeout = connectTimeoutInMs;
++    self->nextReadTimeout = Hal_getTimeInMs() + self->connectTimeout;
+ 
+     if (Socket_connectAsync(self->socket, self->parameters->hostname, self->parameters->tcpPort) == false) {
+ 
+@@ -684,9 +732,10 @@ IsoClientConnection_associateAsync(IsoClientConnection self, uint32_t connectTim
+     return success;
+ }
+ 
+-void
++int
+ IsoClientConnection_sendMessage(IsoClientConnection self, ByteBuffer* payloadBuffer)
+ {
++    int ret = -1;
+     if (getState(self) == STATE_CONNECTED) {
+         struct sBufferChain payloadBCMemory;
+         BufferChain payload = &payloadBCMemory;
+@@ -708,9 +757,13 @@ IsoClientConnection_sendMessage(IsoClientConnection self, ByteBuffer* payloadBuf
+ 
+         CotpIndication indication = CotpConnection_sendDataMessage(self->cotpConnection, sessionBuffer);
+ 
+-        if (indication != COTP_OK)
+-            if (DEBUG_ISO_CLIENT)
++        if (indication == COTP_OK) {
++            ret = 0;
++        } else {
++            if (DEBUG_ISO_CLIENT) {
+                 printf("ISO_CLIENT: IsoClientConnection_sendMessage: send message failed!\n");
++            }
++        }
+     }
+     else {
+         if (DEBUG_ISO_CLIENT)
+@@ -719,6 +772,7 @@ IsoClientConnection_sendMessage(IsoClientConnection self, ByteBuffer* payloadBuf
+ 
+     /* release transmit buffer for use by API client */
+     Semaphore_post(self->transmitBufferMutex);
++    return ret;
+ }
+ 
+ void
+diff --git a/src/mms/iso_mms/client/mms_client_connection.c b/src/mms/iso_mms/client/mms_client_connection.c
+index 0cdd5da..4054ef5 100644
+--- a/src/mms/iso_mms/client/mms_client_connection.c
++++ b/src/mms/iso_mms/client/mms_client_connection.c
+@@ -37,7 +37,6 @@
+ 
+ #define CONFIG_MMS_CONNECTION_DEFAULT_TIMEOUT 5000
+ #define CONFIG_MMS_CONNECTION_DEFAULT_CONNECT_TIMEOUT 10000
+-#define OUTSTANDING_CALLS 10
+ 
+ static void
+ setConnectionState(MmsConnection self, MmsConnectionState newState)
+@@ -344,7 +343,7 @@ mmsClient_getMatchingObtainFileRequest(MmsConnection self, const char* filename)
+     return NULL;
+ }
+ 
+-static void
++static int
+ sendMessage(MmsConnection self, ByteBuffer* message)
+ {
+ #if (CONFIG_MMS_RAW_MESSAGE_LOGGING == 1)
+@@ -358,7 +357,7 @@ sendMessage(MmsConnection self, ByteBuffer* message)
+     self->statAplMessagesSent++;
+ #endif
+ 
+-    IsoClientConnection_sendMessage(self->isoClient, message);
++    return IsoClientConnection_sendMessage(self->isoClient, message);
+ }
+ 
+ static MmsError
+@@ -373,7 +372,9 @@ sendAsyncRequest(MmsConnection self, uint32_t invokeId, ByteBuffer* message, eMm
+         return MMS_ERROR_OUTSTANDING_CALL_LIMIT;
+     }
+ 
+-    sendMessage(self, message);
++    int ret = sendMessage(self, message);
++    if (ret != 0)
++        return MMS_ERROR_CONNECTION_LOST;
+ 
+     return MMS_ERROR_NONE;
+ }
+@@ -1000,8 +1001,11 @@ mmsIsoCallback(IsoIndication indication, void* parameter, ByteBuffer* payload)
+             if (self->outstandingCalls[i].isUsed) {
+                 if (currentTime > self->outstandingCalls[i].timeout) {
+ 
+-                    if (self->outstandingCalls[i].type != MMS_CALL_TYPE_NONE)
++                    if (self->outstandingCalls[i].type != MMS_CALL_TYPE_NONE) {
++                        Semaphore_post(self->outstandingCallsLock);
+                         handleAsyncResponse(self, NULL, 0, &(self->outstandingCalls[i]), MMS_ERROR_SERVICE_TIMEOUT);
++                        Semaphore_wait(self->outstandingCallsLock);
++                    }
+ 
+                     self->outstandingCalls[i].isUsed = false;
+                     break;
+@@ -1031,6 +1035,10 @@ mmsIsoCallback(IsoIndication indication, void* parameter, ByteBuffer* payload)
+         if (self->connectionLostHandler != NULL)
+             self->connectionLostHandler(self, self->connectionLostHandlerParameter);
+ 
++        if (self->stateChangedHandler)
++            self->stateChangedHandler(self, self->stateChangedHandlerParameter, 
++                    MMS_CONNECTION_STATE_CLOSED);
++
+         return;
+     }
+ 
+@@ -1042,6 +1050,27 @@ mmsIsoCallback(IsoIndication indication, void* parameter, ByteBuffer* payload)
+         return;
+     }
+ 
++    if (indication == ISO_IND_RECONNECT) {
++        ByteBuffer* payload = IsoClientConnection_allocateTransmitBuffer(self->isoClient);
++        mmsClient_createInitiateRequest(self, payload);
++
++        #if (CONFIG_MMS_RAW_MESSAGE_LOGGING == 1)
++            if (self->rawMmsMessageHandler != NULL) {
++                MmsRawMessageHandler handler = (MmsRawMessageHandler) self->rawMmsMessageHandler;
++                handler(self->rawMmsMessageHandlerParameter, payload->buffer, payload->size, false);
++            }
++        #endif /* (CONFIG_MMS_RAW_MESSAGE_LOGGING == 1) */
++
++        if (IsoClientConnection_associateAsync(self->isoClient, self->connectTimeout, self->requestTimeout)) {
++            setConnectionState(self, MMS_CONNECTION_STATE_CONNECTING);
++        }
++
++        if (self->stateChangedHandler)
++            self->stateChangedHandler(self, self->stateChangedHandlerParameter, 
++                    MMS_CONNECTION_STATE_RECONNECT);
++        return;
++    }
++
+     if (payload != NULL) {
+         if (ByteBuffer_getSize(payload) < 1) {
+             return;
+@@ -1401,7 +1430,7 @@ connectionHandlingThread(void* parameter)
+ 
+     while (self->connectionThreadRunning) {
+         if (MmsConnection_tick(self))
+-            Thread_sleep(1);
++            Thread_sleep(10);
+     }
+ 
+     return NULL;
+@@ -1605,6 +1634,14 @@ MmsConnection_setConnectTimeout(MmsConnection self, uint32_t timeoutInMs)
+     self->connectTimeout = timeoutInMs;
+ }
+ 
++void
++MmsConnection_setKeepAliveParams(MmsConnection self, int idle, int cnt, int interval)
++{
++    self->tcpKA_idle = idle;
++    self->tcpKA_cnt = cnt;
++    self->tcpKA_interval = interval;
++}
++
+ void
+ MmsConnection_setLocalDetail(MmsConnection self, int32_t localDetail)
+ {
+@@ -1674,7 +1711,7 @@ MmsConnection_connect(MmsConnection self, MmsError* mmsError, const char* server
+ 
+     MmsError err;
+ 
+-    MmsConnection_connectAsync(self, &err, serverName, serverPort);
++    MmsConnection_connectAsync(self, &err, 0, 0, serverName, serverPort);
+ 
+     if (err == MMS_ERROR_NONE) {
+         Semaphore_wait(conParams.sem);
+@@ -1704,7 +1741,9 @@ MmsConnection_connect(MmsConnection self, MmsError* mmsError, const char* server
+ }
+ 
+ void
+-MmsConnection_connectAsync(MmsConnection self, MmsError* mmsError, const char* serverName, int serverPort)
++MmsConnection_connectAsync(MmsConnection self, MmsError* mmsError, 
++        const char *clientIp, int clientPort, 
++        const char* serverName, int serverPort)
+ {
+     if (serverPort == -1) {
+ #if (CONFIG_MMS_SUPPORT_TLS == 1)
+@@ -1744,6 +1783,10 @@ MmsConnection_connectAsync(MmsConnection self, MmsError* mmsError, const char* s
+     }
+ #endif /* (CONFIG_MMS_RAW_MESSAGE_LOGGING == 1) */
+ 
++    IsoClientConnection_setReconnectBehavior(self->isoClient, 1);
++    IsoClientConnection_setKeepAliveParams(self->isoClient, self->tcpKA_idle, self->tcpKA_cnt, self->tcpKA_interval);
++    IsoClientConnection_setSockParams(self->isoClient, clientIp, (uint16_t)clientPort);
++
+     if (IsoClientConnection_associateAsync(self->isoClient, self->connectTimeout, self->requestTimeout)) {
+         setConnectionState(self, MMS_CONNECTION_STATE_CONNECTING);
+         *mmsError = MMS_ERROR_NONE;
+@@ -1763,8 +1806,11 @@ MmsConnection_close(MmsConnection self)
+ {
+     self->connectionLostHandler = NULL;
+ 
+-    if (getConnectionState(self) == MMS_CONNECTION_STATE_CONNECTED)
++    // if (getConnectionState(self) == MMS_CONNECTION_STATE_CONNECTED) {
++        IsoClientConnection_setReconnectBehavior(self->isoClient, 0);
++        setConnectionState(self, MMS_CONNECTION_STATE_CLOSING);
+         IsoClientConnection_close(self->isoClient);
++    // }
+ }
+ 
+ void
+@@ -1878,6 +1924,8 @@ MmsConnection_concludeAsync(MmsConnection self, MmsError* mmsError, MmsConnectio
+     self->concludeHandler = handler;
+     self->concludeHandlerParameter = parameter;
+     self->concludeTimeout = Hal_getTimeInMs() + self->requestTimeout;
++    
++    IsoClientConnection_setReconnectBehavior(self->isoClient, 0);
+ 
+     IsoClientConnection_sendMessage(self->isoClient, concludeMessage);
+ 

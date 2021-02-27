@@ -1,0 +1,22 @@
+diff --git a/lib60870-C/src/hal/thread/linux/thread_linux.c b/lib60870-C/src/hal/thread/linux/thread_linux.c
+index 72fe875..a4e2627 100644
+--- a/lib60870-C/src/hal/thread/linux/thread_linux.c
++++ b/lib60870-C/src/hal/thread/linux/thread_linux.c
+@@ -94,12 +94,15 @@ destroyAutomaticThread(void* parameter)
+ void
+ Thread_start(Thread thread)
+ {
++	pthread_attr_t attr;
++	pthread_attr_init(&attr);
++	pthread_attr_setstacksize(&attr, 1<<20);
+ 	if (thread->autodestroy == true) {
+-		pthread_create(&thread->pthread, NULL, destroyAutomaticThread, thread);
++		pthread_create(&thread->pthread, &attr, destroyAutomaticThread, thread);
+ 		pthread_detach(thread->pthread);
+ 	}
+ 	else
+-		pthread_create(&thread->pthread, NULL, thread->function, thread->parameter);
++		pthread_create(&thread->pthread, &attr, thread->function, thread->parameter);
+ 
+ 	thread->state = 1;
+ }

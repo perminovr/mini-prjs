@@ -1,0 +1,235 @@
+diff --git a/src/mms/inc/mms_value.h b/src/mms/inc/mms_value.h
+index 97c1a94..358ba5e 100644
+--- a/src/mms/inc/mms_value.h
++++ b/src/mms/inc/mms_value.h
+@@ -271,6 +271,8 @@ MmsValue_setUint16(MmsValue* value, uint16_t integer);
+  */
+ LIB61850_API void
+ MmsValue_setUint32(MmsValue* value, uint32_t integer);
++LIB61850_API void
++MmsValue_setUint64(MmsValue* value, uint64_t integer);
+ 
+ 
+ /**
+@@ -688,6 +690,9 @@ MmsValue_newIntegerFromInt64(int64_t integer);
+ LIB61850_API MmsValue*
+ MmsValue_newUnsignedFromUint32(uint32_t integer);
+ 
++LIB61850_API MmsValue*
++MmsValue_newUnsignedFromUint64(uint64_t integer);
++
+ LIB61850_API MmsValue*
+ MmsValue_newFloat(float variable);
+ 
+diff --git a/src/mms/inc_private/mms_value_internal.h b/src/mms/inc_private/mms_value_internal.h
+index 20b8920..42efb71 100644
+--- a/src/mms/inc_private/mms_value_internal.h
++++ b/src/mms/inc_private/mms_value_internal.h
+@@ -62,6 +62,8 @@ struct ATTRIBUTE_PACKED sMmsValue {
+             uint8_t buf[6];
+         } binaryTime;
+     } value;
++    MmsValue *parent;
++    int idx;
+ };
+ 
+ 
+diff --git a/src/mms/iso_mms/client/mms_client_read.c b/src/mms/iso_mms/client/mms_client_read.c
+index 795cff9..ac17b3f 100644
+--- a/src/mms/iso_mms/client/mms_client_read.c
++++ b/src/mms/iso_mms/client/mms_client_read.c
+@@ -90,6 +90,8 @@ mmsClient_parseListOfAccessResults(AccessResult_t** accessResultList, int listSi
+                         value = NULL;
+                         break;
+                     }
++                    value->value.structure.components[j]->parent = value;
++                    value->value.structure.components[j]->idx = j;
+                 }
+             }
+             else {
+@@ -119,6 +121,8 @@ mmsClient_parseListOfAccessResults(AccessResult_t** accessResultList, int listSi
+                         value = NULL;
+                         break;
+                     }
++                    value->value.structure.components[j]->parent = value;
++                    value->value.structure.components[j]->idx = j;
+                 }
+             }
+             else {
+@@ -208,11 +212,11 @@ mmsClient_parseListOfAccessResults(AccessResult_t** accessResultList, int listSi
+ 
+                 value->value.floatingPoint.buf = (uint8_t*) GLOBAL_MALLOC(4);
+ 
+-#if (ORDER_LITTLE_ENDIAN == 1)
++            #if (ORDER_LITTLE_ENDIAN == 1)
+                 memcpyReverseByteOrder(value->value.floatingPoint.buf, floatBuf, 4);
+-#else
++            #else
+                 memcpy(value->value.floatingPoint.buf, floatBuf, 4);
+-#endif
++            #endif
+ 
+             }
+             else if (size == 9) { /* FLOAT64 */
+@@ -227,11 +231,11 @@ mmsClient_parseListOfAccessResults(AccessResult_t** accessResultList, int listSi
+ 
+                 value->value.floatingPoint.buf = (uint8_t*) GLOBAL_MALLOC(8);
+ 
+-#if (ORDER_LITTLE_ENDIAN == 1)
++            #if (ORDER_LITTLE_ENDIAN == 1)
+                 memcpyReverseByteOrder(value->value.floatingPoint.buf, floatBuf, 8);
+-#else
++            #else
+                 memcpy(value->value.floatingPoint.buf, floatBuf, 8);
+-#endif
++            #endif
+             }
+             else {
+                 if (DEBUG_MMS_CLIENT)
+diff --git a/src/mms/iso_mms/common/mms_common_msg.c b/src/mms/iso_mms/common/mms_common_msg.c
+index 857119a..38da0ff 100644
+--- a/src/mms/iso_mms/common/mms_common_msg.c
++++ b/src/mms/iso_mms/common/mms_common_msg.c
+@@ -207,6 +207,8 @@ mmsMsg_parseDataElement(Data_t* dataElement)
+                     value = NULL;
+                     break;
+                 }
++                value->value.structure.components[i]->parent = value;
++                value->value.structure.components[i]->idx = i;
+             }
+         }
+         else {
+@@ -237,6 +239,8 @@ mmsMsg_parseDataElement(Data_t* dataElement)
+                     value = NULL;
+                     break;
+                 }
++                value->value.structure.components[i]->parent = value;
++                value->value.structure.components[i]->idx = i;
+             }
+         }
+         else {
+@@ -337,11 +341,11 @@ mmsMsg_parseDataElement(Data_t* dataElement)
+                 uint8_t* floatBuf = (dataElement->choice.floatingpoint.buf + 1);
+ 
+                 value->value.floatingPoint.buf = (uint8_t*) GLOBAL_MALLOC(4);
+-#if (ORDER_LITTLE_ENDIAN == 1)
++            #if (ORDER_LITTLE_ENDIAN == 1)
+                 memcpyReverseByteOrder(value->value.floatingPoint.buf, floatBuf, 4);
+-#else
++            #else
+                 memcpy(value->value.floatingPoint.buf, floatBuf, 4);
+-#endif
++            #endif
+             }
+ 
+             if (size == 9) { /* FLOAT64 */
+@@ -355,11 +359,11 @@ mmsMsg_parseDataElement(Data_t* dataElement)
+                 uint8_t* floatBuf = (dataElement->choice.floatingpoint.buf + 1);
+ 
+                 value->value.floatingPoint.buf = (uint8_t*) GLOBAL_MALLOC(8);
+-#if (ORDER_LITTLE_ENDIAN == 1)
++            #if (ORDER_LITTLE_ENDIAN == 1)
+                 memcpyReverseByteOrder(value->value.floatingPoint.buf, floatBuf, 8);
+-#else
++            #else
+                 memcpy(value->value.floatingPoint.buf, floatBuf, 8);
+-#endif
++            #endif
+             }
+         }
+         else if (dataElement->present == Data_PR_utctime) {
+diff --git a/src/mms/iso_mms/common/mms_value.c b/src/mms/iso_mms/common/mms_value.c
+index 2b6e5f0..d9be797 100644
+--- a/src/mms/iso_mms/common/mms_value.c
++++ b/src/mms/iso_mms/common/mms_value.c
+@@ -225,7 +225,7 @@ MmsValue_equalTypes(const MmsValue* self, const MmsValue* otherValue)
+ bool
+ MmsValue_update(MmsValue* self, const MmsValue* update)
+ {
+-    if (self->type == update->type) {
++    if (self && update && self->type == update->type) {
+         switch (self->type)
+         {
+         case MMS_STRUCTURE:
+@@ -643,6 +643,16 @@ MmsValue_setInt64(MmsValue* self, int64_t integer)
+     }
+ }
+ 
++void
++MmsValue_setUint64(MmsValue* self, uint64_t integer)
++{
++    if (self->type == MMS_UNSIGNED) {
++        if (Asn1PrimitiveValue_getMaxSize(self->value.integer) >= 8) {
++            BerInteger_setUint64(self->value.integer, integer);
++        }
++    }
++}
++
+ void
+ MmsValue_setUint32(MmsValue* self, uint32_t integer)
+ {
+@@ -853,6 +863,20 @@ MmsValue_newIntegerFromInt64(int64_t integer)
+     return self;
+ }
+ 
++MmsValue*
++MmsValue_newUnsignedFromUint64(uint64_t integer)
++{
++    MmsValue* self = (MmsValue*) GLOBAL_CALLOC(1, sizeof(MmsValue));
++
++    if (self == NULL)
++        return NULL;
++
++    self->type = MMS_UNSIGNED;
++    self->value.integer = BerInteger_createFromUint64(integer);
++
++    return self;
++}
++
+ /**
+  * Convert signed integer to int32_t
+  */
+@@ -1101,6 +1125,10 @@ MmsValue_clone(const MmsValue* self)
+             for (i = 0; i < componentCount; i++) {
+                 newValue->value.structure.components[i] =
+                         MmsValue_clone(self->value.structure.components[i]);
++                if (newValue->value.structure.components[i]) {
++                    newValue->value.structure.components[i]->parent = newValue;
++                    newValue->value.structure.components[i]->idx = i;
++                }
+             }
+         }
+         break;
+@@ -1380,6 +1408,10 @@ MmsValue_newStructure(const MmsVariableSpecification* typeSpec)
+     for (i = 0; i < componentCount; i++) {
+         self->value.structure.components[i] =
+                 MmsValue_newDefaultValue(typeSpec->typeSpec.structure.elements[i]);
++        if (self->value.structure.components[i]) {
++            self->value.structure.components[i]->parent = self;
++            self->value.structure.components[i]->idx = i;
++        }
+     }
+ 
+     return self;
+@@ -1841,6 +1873,10 @@ MmsValue_createArray(MmsVariableSpecification* elementType, int size)
+             self = NULL;
+             goto exit_function;
+         }
++        if (self->value.structure.components[i]) {
++            self->value.structure.components[i]->parent = self;
++            self->value.structure.components[i]->idx = i;
++        }
+     }
+ 
+ exit_function:
+@@ -1897,6 +1933,10 @@ MmsValue_setElement(MmsValue* complexValue, int index, MmsValue* elementValue)
+         return;
+ 
+     complexValue->value.structure.components[index] = elementValue;
++    if (elementValue) {
++        elementValue->parent = complexValue;
++        elementValue->idx = index;
++    }
+ }
+ 
+ MmsValue*

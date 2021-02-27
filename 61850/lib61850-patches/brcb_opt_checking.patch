@@ -1,0 +1,99 @@
+diff --git a/src/iec61850/client/client_report_control.c b/src/iec61850/client/client_report_control.c
+index 07f6df0..64cafcc 100644
+--- a/src/iec61850/client/client_report_control.c
++++ b/src/iec61850/client/client_report_control.c
+@@ -438,7 +438,7 @@ clientReportControlBlock_updateValues(ClientReportControlBlock self, MmsValue* v
+         if (!checkElementType(values, 12, MMS_BINARY_TIME)) return false;
+ 
+         if (rcbElementCount == 14) {
+-            if (!checkElementType(values, 13, MMS_OCTET_STRING)) return false;
++            if (!checkElementType(values, 13, MMS_OCTET_STRING) && !checkElementType(values, 13, MMS_INTEGER)) return false;
+         }
+         else if (rcbElementCount == 15) {
+             if (!checkElementType(values, 13, MMS_INTEGER)) return false;
+@@ -868,9 +868,7 @@ IedConnection_setRCBValuesAsync(IedConnection self, IedClientError* error, Clien
+          LinkedList_add(values, rcb->resv);
+      }
+ 
+-     if (parametersMask & RCB_ELEMENT_RESV_TMS) {
+-         if (!isBuffered)
+-             goto error_invalid_parameter;
++     if ((parametersMask & RCB_ELEMENT_RESV_TMS) && isBuffered) {
+ 
+          strcpy(itemId + itemIdLen, "$ResvTms");
+ 
+@@ -892,7 +890,8 @@ IedConnection_setRCBValuesAsync(IedConnection self, IedClientError* error, Clien
+          LinkedList_add(values, rcb->datSet);
+      }
+ 
+-     if (parametersMask & RCB_ELEMENT_ENTRY_ID) {
++     if ((parametersMask & RCB_ELEMENT_ENTRY_ID) && isBuffered) {
++
+          strcpy(itemId + itemIdLen, "$EntryID");
+ 
+          LinkedList_add(itemIds, StringUtils_copyString(itemId));
+@@ -942,9 +941,7 @@ IedConnection_setRCBValuesAsync(IedConnection self, IedClientError* error, Clien
+          }
+      }
+ 
+-     if (parametersMask & RCB_ELEMENT_PURGE_BUF) {
+-         if (!isBuffered)
+-             goto error_invalid_parameter;
++     if ((parametersMask & RCB_ELEMENT_PURGE_BUF) && isBuffered) {
+ 
+          strcpy(itemId + itemIdLen, "$PurgeBuf");
+ 
+@@ -952,9 +949,7 @@ IedConnection_setRCBValuesAsync(IedConnection self, IedClientError* error, Clien
+          LinkedList_add(values, rcb->purgeBuf);
+      }
+ 
+-     if (parametersMask & RCB_ELEMENT_TIME_OF_ENTRY) {
+-         if (!isBuffered)
+-             goto error_invalid_parameter;
++     if ((parametersMask & RCB_ELEMENT_TIME_OF_ENTRY) && isBuffered) {
+ 
+          strcpy(itemId + itemIdLen, "$TimeofEntry");
+ 
+@@ -1087,9 +1082,7 @@ IedConnection_setRCBValues(IedConnection self, IedClientError* error, ClientRepo
+         LinkedList_add(values, rcb->resv);
+     }
+ 
+-    if (parametersMask & RCB_ELEMENT_RESV_TMS) {
+-        if (!isBuffered)
+-            goto error_invalid_parameter;
++    if ((parametersMask & RCB_ELEMENT_RESV_TMS) && isBuffered) {
+ 
+         strcpy(itemId + itemIdLen, "$ResvTms");
+ 
+@@ -1111,7 +1104,8 @@ IedConnection_setRCBValues(IedConnection self, IedClientError* error, ClientRepo
+         LinkedList_add(values, rcb->datSet);
+     }
+ 
+-    if (parametersMask & RCB_ELEMENT_ENTRY_ID) {
++    if ((parametersMask & RCB_ELEMENT_ENTRY_ID) && isBuffered) {
++
+         strcpy(itemId + itemIdLen, "$EntryID");
+ 
+         LinkedList_add(itemIds, StringUtils_copyString(itemId));
+@@ -1161,9 +1155,7 @@ IedConnection_setRCBValues(IedConnection self, IedClientError* error, ClientRepo
+         }
+     }
+ 
+-    if (parametersMask & RCB_ELEMENT_PURGE_BUF) {
+-        if (!isBuffered)
+-            goto error_invalid_parameter;
++    if ((parametersMask & RCB_ELEMENT_PURGE_BUF) && isBuffered) {
+ 
+         strcpy(itemId + itemIdLen, "$PurgeBuf");
+ 
+@@ -1171,9 +1163,7 @@ IedConnection_setRCBValues(IedConnection self, IedClientError* error, ClientRepo
+         LinkedList_add(values, rcb->purgeBuf);
+     }
+ 
+-    if (parametersMask & RCB_ELEMENT_TIME_OF_ENTRY) {
+-        if (!isBuffered)
+-            goto error_invalid_parameter;
++    if ((parametersMask & RCB_ELEMENT_TIME_OF_ENTRY) && isBuffered) {
+ 
+         strcpy(itemId + itemIdLen, "$TimeofEntry");
+ 

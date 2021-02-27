@@ -1,0 +1,13 @@
+diff --git a/lib60870-C/src/iec60870/link_layer/link_layer.c b/lib60870-C/src/iec60870/link_layer/link_layer.c
+index cced8a6..7409e87 100644
+--- a/lib60870-C/src/iec60870/link_layer/link_layer.c
++++ b/lib60870-C/src/iec60870/link_layer/link_layer.c
+@@ -1719,6 +1719,8 @@ LinkLayerSlaveConnection_runStateMachine(LinkLayerSlaveConnection self)
+     /* TODO make timeouts dealing with time adjustments (time moves to past) */
+     uint64_t currentTime = Hal_getTimeInMs();
+ 
++	if (!self) return;
++
+     PrimaryLinkLayerState primaryState = self->primaryState;
+     PrimaryLinkLayerState newState = primaryState;
+ 

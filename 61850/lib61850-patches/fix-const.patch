@@ -1,0 +1,26 @@
+diff --git a/src/mms/inc/iso_connection_parameters.h b/src/mms/inc/iso_connection_parameters.h
+index cdd04bc..5f87a60 100644
+--- a/src/mms/inc/iso_connection_parameters.h
++++ b/src/mms/inc/iso_connection_parameters.h
+@@ -88,7 +88,7 @@ LIB61850_API void
+ AcseAuthenticationParameter_setAuthMechanism(AcseAuthenticationParameter self, AcseAuthenticationMechanism mechanism);
+ 
+ LIB61850_API void
+-AcseAuthenticationParameter_setPassword(AcseAuthenticationParameter self, char* password);
++AcseAuthenticationParameter_setPassword(AcseAuthenticationParameter self, const char* password);
+ 
+ 
+ /**
+diff --git a/src/mms/iso_common/iso_connection_parameters.c b/src/mms/iso_common/iso_connection_parameters.c
+index bb48001..ff982df 100644
+--- a/src/mms/iso_common/iso_connection_parameters.c
++++ b/src/mms/iso_common/iso_connection_parameters.c
+@@ -51,7 +51,7 @@ AcseAuthenticationParameter_destroy(AcseAuthenticationParameter self)
+ }
+ 
+ void
+-AcseAuthenticationParameter_setPassword(AcseAuthenticationParameter self, char* password)
++AcseAuthenticationParameter_setPassword(AcseAuthenticationParameter self, const char* password)
+ {
+     self->value.password.octetString = (uint8_t*) StringUtils_copyString(password);
+     self->value.password.passwordLength = strlen(password);

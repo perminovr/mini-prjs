@@ -1,0 +1,5 @@
+PREREQ_GooseSub :=
+PREREQ_H_GooseSub := 
+
+CFLAGS_GooseSub := -Wall
+LDFLAGS_GooseSub := -pthread

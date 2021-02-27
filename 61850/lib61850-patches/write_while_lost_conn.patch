@@ -1,0 +1,26 @@
+diff --git a/src/mms/iso_cotp/cotp.c b/src/mms/iso_cotp/cotp.c
+index e195521..89683ad 100644
+--- a/src/mms/iso_cotp/cotp.c
++++ b/src/mms/iso_cotp/cotp.c
+@@ -184,7 +184,21 @@ sendBuffer(CotpConnection* self)
+ 
+     int sentBytes;
+ 
++    // inf loop (send ret 0); call stack:
++    // IedConnection_readDataSetValuesAsync
++    // MmsConnection_readNamedVariableListValuesAsync
++    // sendAsyncRequest
++    // sendMessage
++    // IsoClientConnection_sendMessage
++    // CotpConnection_sendDataMessage
++    // sendBuffer
++    //
++    int attempt = 1024;
++
+     do {
++        if (!(attempt--))
++            goto exit_function;
++            
+         sentBytes = writeToSocket(self, ByteBuffer_getBuffer(self->writeBuffer), writeBufferPosition);
+ 
+         if (sentBytes == -1)

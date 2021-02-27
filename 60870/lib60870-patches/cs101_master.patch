@@ -1,0 +1,25 @@
+diff --git a/lib60870-C/src/iec60870/cs101/cs101_master.c b/lib60870-C/src/iec60870/cs101/cs101_master.c
+index 7f256e5..601b8bc 100644
+--- a/lib60870-C/src/iec60870/cs101/cs101_master.c
++++ b/lib60870-C/src/iec60870/cs101/cs101_master.c
+@@ -249,6 +249,7 @@ masterMainThread(void* parameter)
+ 
+     while (self->isRunning) {
+         CS101_Master_run(self);
++		Thread_sleep(1);
+     }
+ 
+     return NULL;
+diff --git a/lib60870-C/src/inc/api/iec60870_master.h b/lib60870-C/src/inc/api/iec60870_master.h
+index ad849c2..ae9ba57 100644
+--- a/lib60870-C/src/inc/api/iec60870_master.h
++++ b/lib60870-C/src/inc/api/iec60870_master.h
+@@ -52,6 +52,8 @@ extern "C" {
+  */
+ typedef bool (*CS101_ASDUReceivedHandler) (void* parameter, int address, CS101_ASDU asdu);
+ 
++typedef bool (*CS104_ASDUReceivedHandler) (void* parameter, void *connection, CS101_ASDU asdu);
++
+ #ifdef __cplusplus
+ }
+ #endif

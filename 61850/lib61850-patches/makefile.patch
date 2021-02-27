@@ -1,0 +1,91 @@
+diff --git a/Makefile b/Makefile
+index 9c7f368..aab14b5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,5 +1,7 @@
+ LIBIEC_HOME=.
+ 
++TARGET = LINUX-ARM
++
+ include make/target_system.mk
+ 
+ LIB_SOURCE_DIRS = src/mms/iso_acse
+@@ -81,17 +83,28 @@ endif
+ 
+ LIB_INCLUDES = $(addprefix -I,$(LIB_INCLUDE_DIRS))
+ 
++ifdef DESTDIR
++INSTALL_PREFIX = $(DESTDIR)
++endif
+ ifndef INSTALL_PREFIX
+ INSTALL_PREFIX = ./.install
+ endif
+ 
+-LIB_API_HEADER_FILES = hal/inc/hal_time.h 
++LIB_API_HEADER_FILES += hal/inc/hal_base.h 
++LIB_API_HEADER_FILES += hal/inc/hal_time.h 
+ LIB_API_HEADER_FILES += hal/inc/hal_thread.h
+ LIB_API_HEADER_FILES += hal/inc/hal_filesystem.h
++LIB_API_HEADER_FILES += hal/inc/hal_ethernet.h
++LIB_API_HEADER_FILES += hal/inc/hal_socket.h
+ LIB_API_HEADER_FILES += hal/inc/tls_config.h
++LIB_API_HEADER_FILES += hal/inc/platform_endian.h
+ LIB_API_HEADER_FILES += hal/inc/lib_memory.h
++
+ LIB_API_HEADER_FILES += src/common/inc/libiec61850_common_api.h
++LIB_API_HEADER_FILES += src/common/inc/libiec61850_platform_includes.h
+ LIB_API_HEADER_FILES += src/common/inc/linked_list.h
++LIB_API_HEADER_FILES += src/common/inc/string_utilities.h
++
+ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_client.h
+ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_common.h
+ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_server.h
+@@ -99,17 +112,22 @@ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_model.h
+ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_cdc.h
+ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_dynamic_model.h
+ LIB_API_HEADER_FILES += src/iec61850/inc/iec61850_config_file_parser.h
++
+ LIB_API_HEADER_FILES += src/mms/inc/mms_value.h
+ LIB_API_HEADER_FILES += src/mms/inc/mms_common.h
+ LIB_API_HEADER_FILES += src/mms/inc/mms_types.h
+ LIB_API_HEADER_FILES += src/mms/inc/mms_type_spec.h
+ LIB_API_HEADER_FILES += src/mms/inc/mms_client_connection.h
++LIB_API_HEADER_FILES += src/mms/inc/mms_server.h
+ LIB_API_HEADER_FILES += src/mms/inc/iso_connection_parameters.h
++
+ LIB_API_HEADER_FILES += src/goose/goose_subscriber.h
+ LIB_API_HEADER_FILES += src/goose/goose_receiver.h
+ LIB_API_HEADER_FILES += src/goose/goose_publisher.h
++
+ LIB_API_HEADER_FILES += src/sampled_values/sv_subscriber.h
+ LIB_API_HEADER_FILES += src/sampled_values/sv_publisher.h
++
+ LIB_API_HEADER_FILES += src/logging/logging_api.h
+ 
+ get_sources_from_directory  = $(wildcard $1/*.c)
+@@ -137,7 +155,7 @@ CFLAGS += -Wall
+ CGLAGS += -Wextra
+ #CFLAGS += -Werror  
+ 
+-all:	lib
++all:	dynlib
+ 
+ static_checks:	lib
+ 	splint -preproc +posixlib +skip-sys-headers +gnuextensions $(LIB_INCLUDES) $(LIB_SOURCES)
+@@ -168,11 +186,11 @@ $(LIB_OBJS_DIR)/%.o: %.c config
+ 	$(SILENCE)mkdir -p $(dir $@)
+ 	$(CC) $(CFLAGS) -c $(LIB_INCLUDES) $(OUTPUT_OPTION) $<
+ 	
+-install:	$(LIB_NAME)
+-	mkdir -p $(INSTALL_PREFIX)/include
+-	mkdir -p $(INSTALL_PREFIX)/lib
+-	cp $(LIB_API_HEADER_FILES) $(INSTALL_PREFIX)/include
+-	cp $(LIB_NAME) $(INSTALL_PREFIX)/lib
++install:	$(DYN_LIB_NAME)
++	mkdir -p $(INSTALL_PREFIX)/usr/include/libiec61850
++	mkdir -p $(INSTALL_PREFIX)/usr/lib
++	cp $(LIB_API_HEADER_FILES) $(INSTALL_PREFIX)/usr/include/libiec61850
++	cp $(DYN_LIB_NAME) $(INSTALL_PREFIX)/usr/lib
+ 
+ clean:
+ 	rm -f $(EXAMPLES)

@@ -1,0 +1,434 @@
+diff --git a/lib60870-C/src/iec60870/cs104/cs104_connection.c b/lib60870-C/src/iec60870/cs104/cs104_connection.c
+index 7bb47f0..e4ef11e 100644
+--- a/lib60870-C/src/iec60870/cs104/cs104_connection.c
++++ b/lib60870-C/src/iec60870/cs104/cs104_connection.c
+@@ -74,6 +74,16 @@ typedef struct {
+     int seqNo;
+ } SentASDU;
+ 
++typedef enum {
++    INT_STATE_IDLE,
++    INT_STATE_TCP_CONNECTING,
++    INT_STATE_WAIT_FOR_DATA_MSG,
++    INT_STATE_CLOSING_CONNECTION,
++    INT_STATE_WAIT_BEFORE_ERROR,
++    INT_STATE_CLOSE_ON_ERROR,
++    INT_STATE_ERROR
++} eClientInternalState;
++
+ struct sCS104_Connection {
+     char hostname[HOST_NAME_MAX + 1];
+     int tcpPort;
+@@ -127,7 +137,7 @@ struct sCS104_Connection {
+     TLSSocket tlsSocket;
+ #endif
+ 
+-    CS101_ASDUReceivedHandler receivedHandler;
++    CS104_ASDUReceivedHandler receivedHandler;
+     void* receivedHandlerParameter;
+ 
+     CS104_ConnectionHandler connectionHandler;
+@@ -135,24 +145,46 @@ struct sCS104_Connection {
+ 
+     IEC60870_RawMessageHandler rawMessageHandler;
+     void* rawMessageHandlerParameter;
++
++    volatile eClientInternalState intState;
++    uint64_t nextTimeout;
++    uint64_t connectTimeout;
++    const char *clientIp;
++	void *userData;
++	CS104_SMassageReceived SMassageReceivedHandler;
++	void *SMassageReceivedParameter;
+ };
+ 
++static inline void
++setIntState(CS104_Connection self, eClientInternalState newState)
++{
++    self->intState = newState;
++}
++
++static inline eClientInternalState
++getIntState(CS104_Connection self)
++{
++    return self->intState;
++}
+ 
+-static uint8_t STARTDT_ACT_MSG[] = { 0x68, 0x04, 0x07, 0x00, 0x00, 0x00 };
++static uint8_t STARTDT_ACT_MSG[] = { 0x68, 0x04, 0x07, 0x00, 0x00, 0x00 }; // startDT
+ #define STARTDT_ACT_MSG_SIZE 6
+ 
++static uint8_t STARTDT_CON_MSG[] = { 0x68, 0x04, 0x0b, 0x00, 0x00, 0x00 }; // ack for startDT
++#define STARTDT_CON_MSG_SIZE 6
++
++static uint8_t STOPDT_ACT_MSG[] = { 0x68, 0x04, 0x13, 0x00, 0x00, 0x00 }; // stopDT
++#define STOPDT_ACT_MSG_SIZE 6
++
++static uint8_t STOPDT_CON_MSG[] = { 0x68, 0x04, 0x23, 0x00, 0x00, 0x00 }; // ack for stopDT
++#define STOPDT_ACT_MSG_SIZE 6
++
+ static uint8_t TESTFR_ACT_MSG[] = { 0x68, 0x04, 0x43, 0x00, 0x00, 0x00 };
+ #define TESTFR_ACT_MSG_SIZE 6
+ 
+ static uint8_t TESTFR_CON_MSG[] = { 0x68, 0x04, 0x83, 0x00, 0x00, 0x00 };
+ #define TESTFR_CON_MSG_SIZE 6
+ 
+-static uint8_t STOPDT_ACT_MSG[] = { 0x68, 0x04, 0x13, 0x00, 0x00, 0x00 };
+-#define STOPDT_ACT_MSG_SIZE 6
+-
+-static uint8_t STARTDT_CON_MSG[] = { 0x68, 0x04, 0x0b, 0x00, 0x00, 0x00 };
+-#define STARTDT_CON_MSG_SIZE 6
+-
+ static int
+ writeToSocket(CS104_Connection self, uint8_t* buf, int size)
+ {
+@@ -217,7 +249,7 @@ sendIMessage(CS104_Connection self, Frame frame)
+ }
+ 
+ static CS104_Connection
+-createConnection(const char* hostname, int tcpPort)
++createConnection(const char *selfIp, const char* hostname, int tcpPort)
+ {
+     CS104_Connection self = (CS104_Connection) GLOBAL_MALLOC(sizeof(struct sCS104_Connection));
+ 
+@@ -253,6 +285,8 @@ createConnection(const char* hostname, int tcpPort)
+         self->sentASDUs = NULL;
+ 
+         self->conState = STATE_IDLE;
++        self->intState = INT_STATE_IDLE;
++		self->clientIp = selfIp;
+ 
+         prepareSMessage(self->sMessage);
+     }
+@@ -261,12 +295,12 @@ createConnection(const char* hostname, int tcpPort)
+ }
+ 
+ CS104_Connection
+-CS104_Connection_create(const char* hostname, int tcpPort)
++CS104_Connection_create(const char *selfIp, const char* hostname, int tcpPort)
+ {
+     if (tcpPort == -1)
+         tcpPort = IEC_60870_5_104_DEFAULT_PORT;
+ 
+-    return createConnection(hostname, tcpPort);
++    return createConnection(selfIp, hostname, tcpPort);
+ }
+ 
+ #if (CONFIG_CS104_SUPPORT_TLS == 1)
+@@ -276,7 +310,7 @@ CS104_Connection_createSecure(const char* hostname, int tcpPort, TLSConfiguratio
+     if (tcpPort == -1)
+         tcpPort = IEC_60870_5_104_DEFAULT_TLS_PORT;
+ 
+-    CS104_Connection self = createConnection(hostname, tcpPort);
++    CS104_Connection self = createConnection("", hostname, tcpPort);
+ 
+     if (self != NULL) {
+         self->tlsConfig = tlsConfig;
+@@ -632,7 +666,7 @@ checkMessage(CS104_Connection self, uint8_t* buffer, int msgSize)
+ 
+         if (asdu != NULL) {
+             if (self->receivedHandler != NULL)
+-                self->receivedHandler(self->receivedHandlerParameter, -1, asdu);
++                self->receivedHandler(self->receivedHandlerParameter, self, asdu);
+ 
+             CS101_ASDU_destroy(asdu);
+         }
+@@ -694,8 +728,12 @@ checkMessage(CS104_Connection self, uint8_t* buffer, int msgSize)
+ 
+         DEBUG_PRINT("Rcvd S(%i) (own sendcounter = %i)\n", seqNo, self->sendCount);
+ 
+-        if (checkSequenceNumber(self, seqNo) == false)
+-            return false;
++        if (checkSequenceNumber(self, seqNo)) {
++			if (self->SMassageReceivedHandler)
++				self->SMassageReceivedHandler(self, self->SMassageReceivedParameter);
++		} else {
++			return false;
++		}
+     }
+ 
+     resetT3Timeout(self);
+@@ -772,6 +810,154 @@ exit_function:
+     return retVal;
+ }
+ 
++void CS104_Connection_handleConnection(CS104_Connection self)
++{
++    eClientInternalState currentState = getIntState(self);
++    eClientInternalState nextState = currentState;
++	bool closing = false;
++
++	if (self->close) {
++		self->close = false;
++		currentState = INT_STATE_CLOSING_CONNECTION;
++		closing = true;
++	}
++
++	switch (currentState) {
++
++		case INT_STATE_IDLE: {
++		} break;
++
++		case INT_STATE_ERROR: {
++			nextState = INT_STATE_TCP_CONNECTING;
++		} break;
++
++		case INT_STATE_TCP_CONNECTING: {
++			if (!self->socket) {
++				resetConnection(self);
++				self->socket = TcpSocket_createAndBind(self->clientIp, 0);
++				Socket_connectAsync(self->socket, self->hostname, self->tcpPort);
++				self->nextTimeout = Hal_getTimeInMs() + self->connectTimeout;
++			} else {
++            	SocketState socketState = Socket_checkAsyncConnectState(self->socket);
++				if (socketState == SOCKET_STATE_CONNECTED) {
++					if (self->connectionHandler != NULL)
++						self->connectionHandler(self->connectionHandlerParameter, self, CS104_CONNECTION_OPENED);
++					self->conState = STATE_INACTIVE;
++					self->running = true;
++					nextState = INT_STATE_WAIT_FOR_DATA_MSG;
++					CS104_Connection_sendStartDT(self);
++					break;
++				} else if (socketState == SOCKET_STATE_FAILED) {
++					nextState = INT_STATE_WAIT_BEFORE_ERROR;
++				}
++				/* check connect timeout */
++				uint64_t currentTime = Hal_getTimeInMs();
++				if (currentTime > self->nextTimeout) {
++					nextState = INT_STATE_CLOSE_ON_ERROR;
++				}
++			}
++		} break;
++
++		case INT_STATE_WAIT_FOR_DATA_MSG: {
++			if (handleTimeouts(self) == false) {
++				nextState = INT_STATE_CLOSE_ON_ERROR;
++				break;
++			}
++			int bytesRec;
++			{
++			receive_again:
++				bytesRec = receiveMessage(self);
++
++				if (bytesRec < 0) {
++					nextState = INT_STATE_CLOSE_ON_ERROR;
++					break;
++				}
++
++				if (bytesRec > 0) {
++					if (self->rawMessageHandler)
++						self->rawMessageHandler(self->rawMessageHandlerParameter, self->recvBuffer, bytesRec, false);
++
++					if (checkMessage(self, self->recvBuffer, bytesRec) == false) {
++						nextState = INT_STATE_CLOSE_ON_ERROR;
++						break;
++					}
++				}
++
++				if ((self->unconfirmedReceivedIMessages >= self->parameters.w) || (self->conState == STATE_WAITING_FOR_STOPDT_CON)) {
++					confirmOutstandingMessages(self);
++				}
++
++				if (bytesRec > 0) {
++					goto receive_again;
++				}
++			}
++
++		} break;
++
++		case INT_STATE_WAIT_BEFORE_ERROR: {
++			/* check connect timeout */
++			uint64_t currentTime = Hal_getTimeInMs();
++			if (currentTime > self->nextTimeout) {
++				nextState = INT_STATE_CLOSE_ON_ERROR;
++			}
++		} break;
++
++		case INT_STATE_CLOSE_ON_ERROR:
++		case INT_STATE_CLOSING_CONNECTION: {
++			if (self->socket) {
++				/* Confirm all unconfirmed received I-messages before closing the connection */
++				if (self->unconfirmedReceivedIMessages > 0) {
++					confirmOutstandingMessages(self);
++				}
++				Socket_destroy(self->socket);
++				self->socket = 0;
++				if (self->connectionHandler != NULL && closing)
++					self->connectionHandler(self->connectionHandlerParameter, self, CS104_CONNECTION_CLOSED);
++			}
++			self->conState = STATE_IDLE;
++			nextState = (currentState == INT_STATE_CLOSING_CONNECTION)?
++					INT_STATE_IDLE : INT_STATE_ERROR;
++		} break;
++
++		default: { } break;
++
++	}
++
++    setIntState(self, nextState);
++}
++
++void
++CS104_Connection_setUserData(CS104_Connection self, void *userData)
++{
++	self->userData = userData;
++}
++
++void *
++CS104_Connection_getUserData(CS104_Connection self)
++{
++	return self->userData;
++}
++
++bool
++CS104_Connection_getState(CS104_Connection self)
++{
++	eClientInternalState state = getIntState(self);
++	return (state == INT_STATE_WAIT_FOR_DATA_MSG);
++}
++
++void
++CS104_Connection_setSMassageReceivedHandler(CS104_Connection self, CS104_SMassageReceived handler, void *parameter)
++{
++	self->SMassageReceivedHandler = handler;
++	self->SMassageReceivedParameter = parameter;
++}
++
++int
++CS104_Connection_getFd(CS104_Connection self)
++{
++	return Socket_getFd(self->socket);
++}
++
+ #if (CONFIG_USE_THREADS == 1)
+ static void*
+ handleConnection(void* parameter)
+@@ -890,23 +1076,24 @@ handleConnection(void* parameter)
+ #endif /* (CONFIG_USE_THREADS == 1) */
+ 
+ void
+-CS104_Connection_connectAsync(CS104_Connection self)
++CS104_Connection_connectAsync(CS104_Connection self, uint64_t connectTimeoutInMs)
+ {
+     self->running = false;
+     self->failure = false;
+     self->close = false;
+ 
+-#if (CONFIG_USE_THREADS == 1)
+-    if (self->connectionHandlingThread) {
+-        Thread_destroy(self->connectionHandlingThread);
+-        self->connectionHandlingThread = NULL;
+-    }
+-
+-    self->connectionHandlingThread = Thread_create(handleConnection, (void*) self, false);
+-
+-    if (self->connectionHandlingThread)
+-        Thread_start(self->connectionHandlingThread);
+-#endif
++	setIntState(self, INT_STATE_TCP_CONNECTING);
++	self->connectTimeout = connectTimeoutInMs;
++
++// #if (CONFIG_USE_THREADS == 1)
++//     if (self->connectionHandlingThread) {
++//         Thread_destroy(self->connectionHandlingThread);
++//         self->connectionHandlingThread = NULL;
++//     }
++//     self->connectionHandlingThread = Thread_create(handleConnection, (void*) self, false);
++//     if (self->connectionHandlingThread)
++//         Thread_start(self->connectionHandlingThread);
++// #endif
+ }
+ 
+ bool
+@@ -916,7 +1103,7 @@ CS104_Connection_connect(CS104_Connection self)
+     self->failure = false;
+     self->close = false;
+ 
+-    CS104_Connection_connectAsync(self);
++    CS104_Connection_connectAsync(self, 1000);
+ 
+     while ((self->running == false) && (self->failure == false))
+         Thread_sleep(1);
+@@ -925,7 +1112,7 @@ CS104_Connection_connect(CS104_Connection self)
+ }
+ 
+ void
+-CS104_Connection_setASDUReceivedHandler(CS104_Connection self, CS101_ASDUReceivedHandler handler, void* parameter)
++CS104_Connection_setASDUReceivedHandler(CS104_Connection self, CS104_ASDUReceivedHandler handler, void* parameter)
+ {
+     self->receivedHandler = handler;
+     self->receivedHandlerParameter = parameter;
+@@ -1035,7 +1222,7 @@ sendASDUInternal(CS104_Connection self, Frame frame)
+ {
+     bool retVal = false;
+ 
+-    if (self->running) {
++    if (self->running && self->conState == STATE_ACTIVE) {
+         if (isSentBufferFull(self) == false) {
+             sendIMessageAndUpdateSentASDUs(self, frame);
+             retVal = true;
+diff --git a/lib60870-C/src/inc/api/cs104_connection.h b/lib60870-C/src/inc/api/cs104_connection.h
+index a281897..7a0b681 100644
+--- a/lib60870-C/src/inc/api/cs104_connection.h
++++ b/lib60870-C/src/inc/api/cs104_connection.h
+@@ -51,6 +51,8 @@ extern "C" {
+ 
+ typedef struct sCS104_Connection* CS104_Connection;
+ 
++typedef void (*CS104_SMassageReceived)(CS104_Connection self, void *parameter);
++
+ /**
+  * \brief Create a new connection object
+  *
+@@ -60,7 +62,7 @@ typedef struct sCS104_Connection* CS104_Connection;
+  * \return the new connection object
+  */
+ CS104_Connection
+-CS104_Connection_create(const char* hostname, int tcpPort);
++CS104_Connection_create(const char* selfIp, const char* hostname, int tcpPort);
+ 
+ /**
+  * \brief Create a new secure connection object (uses TLS)
+@@ -134,7 +136,10 @@ CS104_Connection_setConnectTimeout(CS104_Connection self, int millies);
+  * \param self CS104_Connection instance
+  */
+ void
+-CS104_Connection_connectAsync(CS104_Connection self);
++CS104_Connection_connectAsync(CS104_Connection self, uint64_t connectTimeoutInMs);
++
++void
++CS104_Connection_handleConnection(CS104_Connection self);
+ 
+ /**
+  * \brief blocking connect
+@@ -292,7 +297,7 @@ CS104_Connection_sendASDU(CS104_Connection self, CS101_ASDU asdu);
+  * \param parameter user provided parameter that is passed to the callback handler
+  */
+ void
+-CS104_Connection_setASDUReceivedHandler(CS104_Connection self, CS101_ASDUReceivedHandler handler, void* parameter);
++CS104_Connection_setASDUReceivedHandler(CS104_Connection self, CS104_ASDUReceivedHandler handler, void* parameter);
+ 
+ 
+ typedef enum {
+@@ -342,6 +347,21 @@ CS104_Connection_close(CS104_Connection self);
+ void
+ CS104_Connection_destroy(CS104_Connection self);
+ 
++void
++CS104_Connection_setUserData(CS104_Connection self, void *userData);
++
++void *
++CS104_Connection_getUserData(CS104_Connection self);
++
++bool
++CS104_Connection_getState(CS104_Connection self);
++
++void
++CS104_Connection_setSMassageReceivedHandler(CS104_Connection self, CS104_SMassageReceived handler, void *parameter);
++
++int
++CS104_Connection_getFd(CS104_Connection self);
++
+ /*! @} */
+ 
+ /*! @} */

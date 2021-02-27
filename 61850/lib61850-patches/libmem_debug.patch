@@ -1,0 +1,23 @@
+diff --git a/hal/inc/lib_memory.h b/hal/inc/lib_memory.h
+index 63463a8..171a600 100644
+--- a/hal/inc/lib_memory.h
++++ b/hal/inc/lib_memory.h
+@@ -26,6 +26,18 @@
+ 
+ #include "hal_base.h"
+ 
++/*
++#define CALLOC(nmemb, size) ({ void *p = Memory_calloc(nmemb, size); printf("CALLOC %lu\n", size); p; })
++#define MALLOC(size)        ({ void *p = Memory_malloc(size); printf("MALLOC %lu\n", size); p; })
++#define REALLOC(oldptr, size)   ({ void *p = Memory_realloc(oldptr, size); printf("REALLOC %lu\n", size); p; })
++#define FREEMEM(ptr)        ({ Memory_free(ptr); printf("FREEMEM\n"); })
++
++#define GLOBAL_CALLOC(nmemb, size) ({ void *p = Memory_calloc(nmemb, size); printf("GLOBAL_CALLOC %lu\n", size); p; })
++#define GLOBAL_MALLOC(size)        ({ void *p = Memory_malloc(size); printf("GLOBAL_MALLOC %lu\n", size); p; })
++#define GLOBAL_REALLOC(oldptr, size)   ({ void *p = Memory_realloc(oldptr, size); printf("GLOBAL_REALLOC %lu\n", size); p; })
++#define GLOBAL_FREEMEM(ptr)        ({ Memory_free(ptr); printf("GLOBAL_FREEMEM\n"); })
++*/
++
+ #define CALLOC(nmemb, size) Memory_calloc(nmemb, size)
+ #define MALLOC(size)        Memory_malloc(size)
+ #define REALLOC(oldptr, size)   Memory_realloc(oldptr, size)

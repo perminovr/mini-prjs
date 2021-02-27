@@ -1,0 +1,68 @@
+diff --git a/lib60870-C/Makefile b/lib60870-C/Makefile
+index 35df5ed..48b8b28 100644
+--- a/lib60870-C/Makefile
++++ b/lib60870-C/Makefile
+@@ -1,5 +1,7 @@
+ LIB60870_HOME=.
+ 
++TARGET = LINUX-ARM
++
+ include make/target_system.mk
+ 
+ ifndef WITHOUT_COMMON
+@@ -54,10 +56,6 @@ LIB_INCLUDE_DIRS += src/common/inc
+ 
+ LIB_INCLUDES = $(addprefix -I,$(LIB_INCLUDE_DIRS))
+ 
+-ifndef INSTALL_PREFIX
+-INSTALL_PREFIX = ./.install
+-endif
+-
+ LIB_API_HEADER_FILES = src/hal/inc/hal_time.h 
+ LIB_API_HEADER_FILES += src/hal/inc/hal_thread.h
+ LIB_API_HEADER_FILES += src/hal/inc/hal_socket.h
+@@ -104,7 +102,9 @@ CFLAGS += -Wshadow
+ CFLAGS += -Wall
+ #CFLAGS += -Werror  
+ 
+-all:	lib
++YO_BUILD_DIR := $(PWD)/../build
++
++all:	preinstall dynlib install
+ 
+ static_checks:	lib
+ 	splint -preproc +posixlib +skip-sys-headers +gnuextensions $(LIB_INCLUDES) $(LIB_SOURCES)
+@@ -120,10 +120,13 @@ dynlib: CFLAGS += -fPIC
+ 
+ dynlib:	$(DYN_LIB_NAME)
+ 
+-.PHONY:	examples
++.PHONY:	examples preinstall
+ 
+ examples:
+ 	cd examples; $(MAKE)
++ 
++preinstall:
++	mkdir -p $(YO_BUILD_DIR)
+ 	
+ $(TEST_NAME):	$(LIB_OBJS) $(TEST_OBJS)
+ 	$(CC) -o $(TEST_NAME) $(LIB_OBJS) $(TEST_OBJS) -lpthread
+@@ -139,12 +142,12 @@ $(LIB_OBJS_DIR)/%.o: %.c config
+ 	@echo compiling $(notdir $<)
+ 	$(SILENCE)mkdir -p $(dir $@)
+ 	$(CC) $(CFLAGS) -c $(LIB_INCLUDES) $(TEST_INCLUDES) $(OUTPUT_OPTION) $<
+-	
+-install:	$(LIB_NAME)
+-	mkdir -p $(INSTALL_PREFIX)/include
+-	mkdir -p $(INSTALL_PREFIX)/lib
+-	cp $(LIB_API_HEADER_FILES) $(INSTALL_PREFIX)/include
+-	cp $(LIB_NAME) $(INSTALL_PREFIX)/lib
++
++install:	$(DYN_LIB_NAME)
++	mkdir -p $(YO_BUILD_DIR)/usr/include/lib60870
++	mkdir -p $(YO_BUILD_DIR)/usr/lib
++	cp $(LIB_API_HEADER_FILES) $(YO_BUILD_DIR)/usr/include/lib60870
++	cp $(DYN_LIB_NAME) $(YO_BUILD_DIR)/usr/lib
+ 
+ clean:
+ 	rm -f $(EXAMPLES)

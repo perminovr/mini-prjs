@@ -1,0 +1,201 @@
+diff --git a/lib60870-C/src/hal/inc/hal_socket.h b/lib60870-C/src/hal/inc/hal_socket.h
+index c2f29da..90be32d 100644
+--- a/lib60870-C/src/hal/inc/hal_socket.h
++++ b/lib60870-C/src/hal/inc/hal_socket.h
+@@ -62,6 +62,14 @@ typedef struct sSocket* Socket;
+ /** Opaque reference for a set of server and socket handles */
+ typedef struct sHandleSet* HandleSet;
+ 
++/** State of an asynchronous connect */
++typedef enum
++{
++    SOCKET_STATE_CONNECTING = 0,
++    SOCKET_STATE_FAILED = 1,
++    SOCKET_STATE_CONNECTED = 2
++} SocketState;
++
+ /**
+  * \brief Create a new connection handle set (HandleSet)
+  *
+@@ -192,6 +200,9 @@ ServerSocket_destroy(ServerSocket self);
+ Socket
+ TcpSocket_create(void);
+ 
++Socket
++TcpSocket_createAndBind(const char *ip, uint16_t port);
++
+ /**
+  * \brief set the timeout to establish a new connection
+  *
+@@ -222,6 +233,12 @@ Socket_setConnectTimeout(Socket self, uint32_t timeoutInMs);
+ bool
+ Socket_connect(Socket self, const char* address, int port);
+ 
++bool
++Socket_connectAsync(Socket self, const char* address, int port);
++
++SocketState
++Socket_checkAsyncConnectState(Socket self);
++
+ /**
+  * \brief read from socket to local buffer (non-blocking)
+  *
+@@ -302,6 +319,9 @@ Socket_getPeerAddressStatic(Socket self, char* peerAddressString);
+ void
+ Socket_destroy(Socket self);
+ 
++int
++Socket_getFd(Socket self);
++
+ /*! @} */
+ 
+ /*! @} */
+diff --git a/lib60870-C/src/hal/socket/linux/socket_linux.c b/lib60870-C/src/hal/socket/linux/socket_linux.c
+index a568164..f7b0c0d 100644
+--- a/lib60870-C/src/hal/socket/linux/socket_linux.c
++++ b/lib60870-C/src/hal/socket/linux/socket_linux.c
+@@ -324,6 +324,124 @@ TcpSocket_create()
+ }
+ 
+ 
++Socket
++TcpSocket_createAndBind(const char *ip, uint16_t port)
++{
++    Socket self = NULL;
++    struct sockaddr_in localSock = {0};
++
++    if (!ip)
++        return TcpSocket_create();
++
++    int sock = socket(AF_INET, SOCK_STREAM, 0);
++
++    if (sock != -1) {
++        self = (Socket) GLOBAL_MALLOC(sizeof(struct sSocket));
++
++		localSock.sin_family = AF_INET;
++		localSock.sin_port = htons(port);
++		localSock.sin_addr.s_addr = inet_addr(ip);
++		if (bind(sock, (struct sockaddr*)&localSock, sizeof(struct sockaddr_in)) < 0) {
++            if (DEBUG_SOCKET)
++                printf("SOCKET: failed to bind\n");
++            return 0;
++		}
++
++        self->fd = sock;
++        self->connectTimeout = 5000;
++
++		int tr = 1;
++		setsockopt(sock, SOL_TCP, TCP_QUICKACK, &tr, sizeof(int));
++		tr = 1;
++		setsockopt(sock, SOL_TCP, TCP_NODELAY, &tr, sizeof(int));
++		// tr = 10000;
++		// setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &tr, sizeof(int));
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)
++        int tcpUserTimeout = 10000;
++        int result = setsockopt(sock, SOL_TCP,  TCP_USER_TIMEOUT, &tcpUserTimeout, sizeof(tcpUserTimeout));
++
++        if (result < 0) {
++            if (DEBUG_SOCKET)
++                printf("SOCKET: failed to set TCP_USER_TIMEOUT\n");
++        }
++#endif
++
++    }
++    else {
++        if (DEBUG_SOCKET)
++            printf("SOCKET: failed to create socket (errno=%i)\n", errno);
++    }
++
++    return self;
++}
++
++bool
++Socket_connectAsync(Socket self, const char* address, int port)
++{
++    struct sockaddr_in serverAddress;
++
++    if (DEBUG_SOCKET)
++        printf("SOCKET: connect: %s:%i\n", address, port);
++
++    if (!prepareServerAddress(address, port, &serverAddress))
++        return false;
++
++    fd_set fdSet;
++    FD_ZERO(&fdSet);
++    FD_SET(self->fd, &fdSet);
++
++    activateTcpNoDelay(self);
++
++    fcntl(self->fd, F_SETFL, O_NONBLOCK);
++
++    if (connect(self->fd, (struct sockaddr *) &serverAddress, sizeof(serverAddress)) < 0) {
++
++        if (errno != EINPROGRESS) {
++            // self->fd = -1; // wtf? close???
++            return false;
++        }
++    }
++
++    return true; /* is connecting or already connected */
++}
++
++SocketState
++Socket_checkAsyncConnectState(Socket self)
++{
++    struct timeval timeout;
++    timeout.tv_sec = 0;
++    timeout.tv_usec = 0;
++
++    fd_set fdSet;
++    FD_ZERO(&fdSet);
++    FD_SET(self->fd, &fdSet);
++
++    int selectVal = select(self->fd + 1, NULL, &fdSet , NULL, &timeout);
++
++    if (selectVal == 1) {
++
++        /* Check if connection is established */
++
++        int so_error;
++        socklen_t len = sizeof so_error;
++
++        if (getsockopt(self->fd, SOL_SOCKET, SO_ERROR, &so_error, &len) >= 0) {
++
++            if (so_error == 0)
++                return SOCKET_STATE_CONNECTED;
++        }
++
++        return SOCKET_STATE_FAILED;
++    }
++    else if (selectVal == 0) {
++        return SOCKET_STATE_CONNECTING;
++    }
++    else {
++        return SOCKET_STATE_FAILED;
++    }
++}
++
+ void
+ Socket_setConnectTimeout(Socket self, uint32_t timeoutInMs)
+ {
+@@ -488,9 +606,6 @@ Socket_read(Socket self, uint8_t* buf, int size)
+ 
+     int read_bytes = recv(self->fd, buf, size, MSG_DONTWAIT);
+ 
+-    if (read_bytes == 0)
+-        return -1;
+-
+     if (read_bytes == -1) {
+         int error = errno;
+ 
+@@ -537,3 +652,9 @@ Socket_destroy(Socket self)
+ 
+     GLOBAL_FREEMEM(self);
+ }
++
++int
++Socket_getFd(Socket self)
++{
++	return (self)? self->fd : -1;
++}

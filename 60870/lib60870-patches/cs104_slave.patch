@@ -1,0 +1,575 @@
+diff --git a/lib60870-C/src/iec60870/cs104/cs104_slave.c b/lib60870-C/src/iec60870/cs104/cs104_slave.c
+index 63459e5..3183107 100644
+--- a/lib60870-C/src/iec60870/cs104/cs104_slave.c
++++ b/lib60870-C/src/iec60870/cs104/cs104_slave.c
+@@ -22,6 +22,7 @@
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <pthread.h>
+ 
+ #include "cs104_slave.h"
+ #include "cs104_frame.h"
+@@ -48,8 +49,6 @@
+ #error Illegal configuration: Define either CONFIG_CS104_SUPPORT_SERVER_MODE_SINGLE_REDUNDANCY_GROUP or CONFIG_CS104_SUPPORT_SERVER_MODE_SINGLE_REDUNDANCY_GROUP or CONFIG_CS104_SUPPORT_SERVER_MODE_MULTIPLE_REDUNDANCY_GROUPS
+ #endif
+ 
+-typedef struct sMasterConnection* MasterConnection;
+-
+ void
+ MasterConnection_close(MasterConnection self);
+ 
+@@ -1029,8 +1028,10 @@ struct sCS104_Slave {
+     int maxLowPrioQueueSize;
+     int maxHighPrioQueueSize;
+ 
++	int maxConnection;
+     int openConnections; /**< number of connected clients */
+-    MasterConnection masterConnections[CONFIG_CS104_MAX_CLIENT_CONNECTIONS]; /**< references to all MasterConnection objects */
++    MasterConnection *masterConnections; /**< references to all MasterConnection objects */
++	bool doNotStartThreads;
+ 
+ #if (CONFIG_USE_SEMAPHORES == 1)
+     Semaphore openConnectionsLock;
+@@ -1074,6 +1075,15 @@ typedef struct {
+     int seqNo;
+ } SentASDUSlave;
+ 
++typedef enum {
++    INT_STATE_IDLE,
++    INT_STATE_PREPARING,
++    INT_STATE_WAIT_FOR_DATA_MSG,
++	INT_STATE_CLOSING_CONNECTION,
++    INT_STATE_CLOSE_ON_ERROR,
++    INT_STATE_ERROR
++} eMasterConnectionState;
++
+ struct sMasterConnection {
+ 
+     Socket socket;
+@@ -1090,6 +1100,7 @@ struct sMasterConnection {
+     unsigned int isUsed:1;
+     unsigned int isActive:1;
+     unsigned int isRunning:1;
++    unsigned int close:1;
+     unsigned int timeoutT2Triggered:1;
+     unsigned int outstandingTestFRConMessages:3;
+     unsigned int maxSentASDUs:16; /* k-parameter */
+@@ -1124,8 +1135,22 @@ struct sMasterConnection {
+ #if (CONFIG_CS104_SUPPORT_SERVER_MODE_MULTIPLE_REDUNDANCY_GROUPS == 1)
+     CS104_RedundancyGroup redundancyGroup;
+ #endif
++	pthread_mutex_t *mu;
++    volatile eMasterConnectionState intState;
+ };
+ 
++static inline void
++setIntState(MasterConnection self, eMasterConnectionState newState)
++{
++    self->intState = newState;
++}
++
++static inline eMasterConnectionState
++getIntState(MasterConnection self)
++{
++    return self->intState;
++}
++
+ static uint8_t STARTDT_CON_MSG[] = { 0x68, 0x04, 0x0b, 0x00, 0x00, 0x00 };
+ 
+ #define STARTDT_CON_MSG_SIZE 6
+@@ -1166,7 +1191,7 @@ initializeConnectionSpecificQueues(CS104_Slave self)
+ {
+     int i;
+ 
+-    for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++    for (i = 0; i < self->maxConnection; i++) {
+         self->masterConnections[i]->lowPrioQueue = MessageQueue_create(self->maxLowPrioQueueSize);
+         self->masterConnections[i]->highPrioQueue = HighPriorityASDUQueue_create(self->maxHighPrioQueueSize);
+     }
+@@ -1174,16 +1199,17 @@ initializeConnectionSpecificQueues(CS104_Slave self)
+ #endif /* (CONFIG_CS104_SUPPORT_SERVER_MODE_CONNECTION_IS_REDUNDANCY_GROUP == 1) */
+ 
+ static MasterConnection
+-MasterConnection_create(CS104_Slave slave);
++MasterConnection_create(CS104_Slave slave, pthread_mutex_t *mu);
+ 
+ static CS104_Slave
+-createSlave(int maxLowPrioQueueSize, int maxHighPrioQueueSize)
++createSlave(int maxConnection, int maxLowPrioQueueSize, int maxHighPrioQueueSize, CS104_APCIParameters apci, pthread_mutex_t *mu)
+ {
+     CS104_Slave self = (CS104_Slave) GLOBAL_CALLOC(1, sizeof(struct sCS104_Slave));
+ 
+     if (self != NULL) {
+ 
+-        self->conParameters = defaultConnectionParameters;
++		if (!apci) self->conParameters = defaultConnectionParameters;
++		else memcpy(&self->conParameters, apci, sizeof(struct sCS104_APCIParameters));
+         self->alParameters = defaultAppLayerParameters;
+ 
+         self->asduHandler = NULL;
+@@ -1198,16 +1224,18 @@ createSlave(int maxLowPrioQueueSize, int maxHighPrioQueueSize)
+         self->rawMessageHandler = NULL;
+         self->maxLowPrioQueueSize = maxLowPrioQueueSize;
+         self->maxHighPrioQueueSize = maxHighPrioQueueSize;
++		self->maxConnection = maxConnection;
++		self->masterConnections = (MasterConnection*) GLOBAL_CALLOC(maxConnection, sizeof(struct sMasterConnection));
+ 
+         {
+             int i;
+ 
+-            for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
+-                self->masterConnections[i] = MasterConnection_create(self);
++            for (i = 0; i < self->maxConnection; i++) {
++                self->masterConnections[i] = MasterConnection_create(self, mu);
+             }
+         }
+ 
+-        self->maxOpenConnections = CONFIG_CS104_MAX_CLIENT_CONNECTIONS;
++        self->maxOpenConnections = self->maxConnection;
+ #if (CONFIG_USE_SEMAPHORES == 1)
+         self->openConnectionsLock = Semaphore_create(1);
+ #endif
+@@ -1249,16 +1277,16 @@ createSlave(int maxLowPrioQueueSize, int maxHighPrioQueueSize)
+ }
+ 
+ CS104_Slave
+-CS104_Slave_create(int maxLowPrioQueueSize, int maxHighPrioQueueSize)
++CS104_Slave_create(int maxConnection, int maxLowPrioQueueSize, int maxHighPrioQueueSize, CS104_APCIParameters apci, pthread_mutex_t *mu)
+ {
+-    return createSlave(maxLowPrioQueueSize, maxHighPrioQueueSize);
++    return createSlave(maxConnection, maxLowPrioQueueSize, maxHighPrioQueueSize, apci, mu);
+ }
+ 
+ #if (CONFIG_CS104_SUPPORT_TLS == 1)
+ CS104_Slave
+-CS104_Slave_createSecure(int maxLowPrioQueueSize, int maxHighPrioQueueSize, TLSConfiguration tlsConfig)
++CS104_Slave_createSecure(int maxConnection, int maxLowPrioQueueSize, int maxHighPrioQueueSize, TLSConfiguration tlsConfig)
+ {
+-    CS104_Slave self = createSlave(maxLowPrioQueueSize, maxHighPrioQueueSize);
++    CS104_Slave self = createSlave(maxConnection, maxLowPrioQueueSize, maxHighPrioQueueSize);
+ 
+     if (self != NULL) {
+         self->tcpPort = 19998;
+@@ -1346,7 +1374,7 @@ getFreeConnection(CS104_Slave self)
+ 
+     int i;
+ 
+-    for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++    for (i = 0; i < self->maxConnection; i++) {
+         if ((self->masterConnections[i]) && (self->masterConnections[i]->isUsed == false)) {
+             connection = self->masterConnections[i];
+             connection->isUsed = true;
+@@ -1372,7 +1400,7 @@ addOpenConnection(CS104_Slave self, MasterConnection connection)
+ 
+     int i;
+ 
+-    for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++    for (i = 0; i < self->maxConnection; i++) {
+         if (self->masterConnections[i] == NULL) {
+             self->masterConnections[i] = connection;
+             self->openConnections++;
+@@ -1389,9 +1417,9 @@ addOpenConnection(CS104_Slave self, MasterConnection connection)
+ void
+ CS104_Slave_setMaxOpenConnections(CS104_Slave self, int maxOpenConnections)
+ {
+-    if (CONFIG_CS104_MAX_CLIENT_CONNECTIONS > 0) {
+-        if (maxOpenConnections > CONFIG_CS104_MAX_CLIENT_CONNECTIONS)
+-            maxOpenConnections = CONFIG_CS104_MAX_CLIENT_CONNECTIONS;
++    if (self->maxConnection > 0) {
++        if (maxOpenConnections > self->maxConnection)
++            maxOpenConnections = self->maxConnection;
+     }
+ 
+     self->maxOpenConnections = maxOpenConnections;
+@@ -1426,7 +1454,7 @@ CS104_Slave_activate(CS104_Slave self, MasterConnection connectionToActivate)
+ #endif
+         int i;
+ 
+-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++        for (i = 0; i < self->maxConnection; i++) {
+             MasterConnection con = self->masterConnections[i];
+ 
+             if (con) {
+@@ -1454,7 +1482,7 @@ CS104_Slave_activate(CS104_Slave self, MasterConnection connectionToActivate)
+ 
+         int i;
+ 
+-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++        for (i = 0; i < self->maxConnection; i++) {
+             MasterConnection con = self->masterConnections[i];
+ 
+             if (con) {
+@@ -1657,6 +1685,21 @@ writeToSocket(MasterConnection self, uint8_t* buf, int size)
+ #endif
+ }
+ 
++// #define DEBUG_COUNTERS
++#if DEBUG_COUNTERS
++#include <time.h>
++#include <sys/time.h>
++static uint64_t cs104s_getsystick(void)
++{
++	struct timespec tv;
++	clock_gettime(CLOCK_MONOTONIC,&tv);
++	return ((uint64_t)tv.tv_sec*1000000L) + (uint64_t)tv.tv_nsec/1000L;
++}
++static volatile uint64_t cs104s_systicks = 0;
++static volatile uint64_t cs104s_frames_tx = 0;
++static volatile uint64_t cs104s_asduo_tx = 0;
++#endif
++
+ static int
+ sendIMessage(MasterConnection self, uint8_t* buffer, int msgSize)
+ {
+@@ -1674,6 +1717,15 @@ sendIMessage(MasterConnection self, uint8_t* buffer, int msgSize)
+         self->sendCount = (self->sendCount + 1) % 32768;
+         self->unconfirmedReceivedIMessages = 0;
+         self->timeoutT2Triggered = false;
++
++		#if DEBUG_COUNTERS
++			cs104s_frames_tx++;
++			cs104s_asduo_tx += buffer[7];
++			if (!cs104s_systicks || ((cs104s_getsystick()-cs104s_systicks) >= 1000000L)) {
++				cs104s_systicks = cs104s_getsystick();
++				printf("systicks %llu frames_tx %llu asduo_tx %llu\n", (cs104s_systicks/1000000L), cs104s_frames_tx, cs104s_asduo_tx);
++			}
++		#endif
+     }
+     else
+         self->isRunning = false;
+@@ -1811,6 +1863,7 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
+         }
+     }
+ 
++#if 0
+     uint8_t cot = CS101_ASDU_getCOT(asdu);
+ 
+     switch (CS101_ASDU_getTypeID(asdu)) {
+@@ -2030,6 +2083,7 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
+     default: /* no special handler available -> use default handler */
+         break;
+     }
++#endif // 0
+ 
+     if ((messageHandled == false) && (slave->asduHandler != NULL))
+         if (slave->asduHandler(slave->asduHandlerParameter, &(self->iMasterConnection), asdu))
+@@ -2561,7 +2615,7 @@ CS104_Slave_removeConnection(CS104_Slave self, MasterConnection connection)
+ 
+     int i;
+ 
+-    for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++    for (i = 0; i < self->maxConnection; i++) {
+         if (self->masterConnections[i] == connection) {
+             self->masterConnections[i]->isUsed = false;
+             break;
+@@ -2578,7 +2632,7 @@ CS104_Slave_removeConnection(CS104_Slave self, MasterConnection connection)
+ }
+ 
+ static void
+-CS104_Slave_closeAllConnections(CS104_Slave self) 
++CS104_Slave_closeAllConnections(CS104_Slave self)
+ {
+ #if (CONFIG_USE_SEMAPHORES)
+     Semaphore_wait(self->openConnectionsLock);
+@@ -2586,7 +2640,7 @@ CS104_Slave_closeAllConnections(CS104_Slave self)
+ 
+     int i;
+ 
+-    for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++    for (i = 0; i < self->maxConnection; i++) {
+         if (self->masterConnections[i]) {
+             if (self->masterConnections[i]->isUsed) {
+                 self->masterConnections[i]->isUsed = false;
+@@ -2634,11 +2688,13 @@ connectionHandlingThread(void* parameter)
+             socketTimeout = 100;
+ 
+         if (Handleset_waitReady(self->handleSet, socketTimeout)) {
+-
+             int bytesRec = receiveMessage(self);
+ 
++			pthread_mutex_lock(self->mu);
++
+             if (bytesRec == -1) {
+                 DEBUG_PRINT("CS104 SLAVE: Error reading from socket\n");
++				pthread_mutex_unlock(self->mu);
+                 break;
+             }
+ 
+@@ -2663,6 +2719,7 @@ connectionHandlingThread(void* parameter)
+                     sendSMessage(self);
+                 }
+             }
++			pthread_mutex_unlock(self->mu);
+         }
+ 
+         if (handleTimeouts(self) == false)
+@@ -2775,11 +2832,13 @@ _IMasterConnection_getApplicationLayerParameters(IMasterConnection self)
+  *******************************************/
+ 
+ static MasterConnection
+-MasterConnection_create(CS104_Slave slave)
++MasterConnection_create(CS104_Slave slave, pthread_mutex_t *mu)
+ {
+     MasterConnection self = (MasterConnection) GLOBAL_CALLOC(1, sizeof(struct sMasterConnection));
+ 
+     if (self != NULL) {
++		self->mu = mu;
++
+         self->isUsed = false;
+         self->slave = slave;
+         self->maxSentASDUs = slave->conParameters.k;
+@@ -2983,7 +3042,7 @@ handleClientConnections(CS104_Slave self)
+ 
+         bool first = true;
+ 
+-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++        for (i = 0; i < self->maxConnection; i++) {
+ 
+             MasterConnection con = self->masterConnections[i];
+ 
+@@ -3027,7 +3086,7 @@ handleClientConnections(CS104_Slave self)
+ 
+             if (Handleset_waitReady(handleset, 1)) {
+ 
+-                for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++                for (i = 0; i < self->maxConnection; i++) {
+                     MasterConnection con = self->masterConnections[i];
+ 
+                     if (con != NULL && con->isUsed)
+@@ -3038,7 +3097,7 @@ handleClientConnections(CS104_Slave self)
+         }
+ 
+         /* handle periodic tasks for running connections */
+-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++        for (i = 0; i < self->maxConnection; i++) {
+             MasterConnection con = self->masterConnections[i];
+ 
+             if (con != NULL && con->isUsed) {
+@@ -3371,7 +3430,13 @@ serverThread (void* parameter)
+ 
+                 if (connection) {
+                     /* now start the connection handling (thread) */
+-                    MasterConnection_start(connection);
++					if (!self->doNotStartThreads) {
++                    	MasterConnection_start(connection);
++					} else {
++						connection->isRunning = true;
++						connection->close = false;
++						setIntState(connection, INT_STATE_PREPARING);
++					}
+                 }
+                 else{
+                     Socket_destroy(newSocket);
+@@ -3441,7 +3506,7 @@ CS104_Slave_enqueueASDU(CS104_Slave self, CS101_ASDU asdu)
+ 
+         int i;
+ 
+-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++        for (i = 0; i < self->maxConnection; i++) {
+ 
+             MasterConnection con = self->masterConnections[i];
+ 
+@@ -3531,6 +3596,127 @@ CS104_Slave_start(CS104_Slave self)
+ #endif
+ }
+ 
++void
++CS104_Slave_masterConnectionHandling(MasterConnection self)
++{
++    eMasterConnectionState currentState = getIntState(self);
++    eMasterConnectionState nextState = currentState;
++
++	if (self->close) {
++		return;
++	}
++
++	switch (currentState) {
++		case INT_STATE_IDLE: {
++		} break;
++
++		case INT_STATE_ERROR: {
++		} break;
++
++		case INT_STATE_PREPARING: {
++			resetT3Timeout(self, Hal_getTimeInMs());
++			if (self->slave->connectionEventHandler) {
++				self->slave->connectionEventHandler(self->slave->connectionEventHandlerParameter, &(self->iMasterConnection), CS104_CON_EVENT_CONNECTION_OPENED);
++			}
++			self->isActive = true;
++			self->isRunning = true;
++			nextState = INT_STATE_WAIT_FOR_DATA_MSG;
++		} break;
++
++		case INT_STATE_WAIT_FOR_DATA_MSG: {
++			if (handleTimeouts(self) == false) {
++				nextState = INT_STATE_CLOSE_ON_ERROR;
++				break;
++			}
++
++			int bytesRec;
++			// int framesCnt = 0;
++			{
++			// receive_again:
++				bytesRec = receiveMessage(self);
++
++				if (bytesRec < 0) {
++					nextState = INT_STATE_CLOSE_ON_ERROR;
++					break;
++				}
++
++				if (bytesRec > 0) {
++					if (self->slave->rawMessageHandler)
++						self->slave->rawMessageHandler(self->slave->rawMessageHandlerParameter,
++								&(self->iMasterConnection), self->recvBuffer, bytesRec, false);
++
++					if (handleMessage(self, self->recvBuffer, bytesRec) == false) {
++						nextState = INT_STATE_CLOSE_ON_ERROR;
++						break;
++					}
++
++					if (self->unconfirmedReceivedIMessages >= self->slave->conParameters.w) {
++						self->lastConfirmationTime = Hal_getTimeInMs();
++						self->unconfirmedReceivedIMessages = 0;
++						self->timeoutT2Triggered = false;
++						sendSMessage(self);
++					}
++				}
++
++				// if (bytesRec > 0) {
++				// 	framesCnt++;
++				// 	if (framesCnt < 10)
++				// 		goto receive_again;
++				// }
++			}
++			if (self->isActive)
++				sendWaitingASDUs(self);
++
++		} break;
++
++		case INT_STATE_CLOSING_CONNECTION:
++		case INT_STATE_CLOSE_ON_ERROR: {
++			if (self->slave->connectionEventHandler) {
++				self->slave->connectionEventHandler(self->slave->connectionEventHandlerParameter, &(self->iMasterConnection), CS104_CON_EVENT_CONNECTION_CLOSED);
++			}
++			CS104_Slave_removeConnection(self->slave, self);
++			self->isRunning = false;
++			self->close = true;
++			nextState = (currentState == INT_STATE_CLOSING_CONNECTION)?
++					INT_STATE_IDLE : INT_STATE_ERROR;
++		} break;
++
++		default: { } break;
++	}
++
++    setIntState(self, nextState);
++}
++
++MasterConnection *
++CS104_Slave_getConnections(CS104_Slave self)
++{
++	return self->masterConnections;
++}
++
++int
++CS104_Slave_getMaxConnections(CS104_Slave self)
++{
++	return self->maxConnection;
++}
++
++IMasterConnection
++CS104_Slave_getIMasterConnection(MasterConnection self)
++{
++	return &self->iMasterConnection;
++}
++
++int
++CS104_Slave_doNotStartClientThreads(CS104_Slave self, bool value)
++{
++	self->doNotStartThreads = value;
++}
++
++int
++CS104_Slave_getFd(MasterConnection self)
++{
++	return Socket_getFd(self->socket);
++}
++
+ int
+ CS104_Slave_getNumberOfQueueEntries(CS104_Slave self, CS104_RedundancyGroup redGroup)
+ {
+@@ -3680,7 +3866,7 @@ CS104_Slave_destroy(CS104_Slave self)
+         {
+             int i;
+ 
+-            for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++            for (i = 0; i < self->maxConnection; i++) {
+                 if (self->masterConnections[i] != NULL && self->masterConnections[i]->isUsed)
+                     MasterConnection_close(self->masterConnections[i]);
+             }
+@@ -3722,7 +3908,7 @@ CS104_Slave_destroy(CS104_Slave self)
+         {
+             int i;
+ 
+-            for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
++            for (i = 0; i < self->maxConnection; i++) {
+ 
+                 if (self->masterConnections[i]) {
+                     MasterConnection_destroy(self->masterConnections[i]);
+@@ -3735,6 +3921,7 @@ CS104_Slave_destroy(CS104_Slave self)
+             LinkedList_destroyStatic(self->plugins);
+         }
+ 
++		GLOBAL_FREEMEM(self->masterConnections);
+         GLOBAL_FREEMEM(self);
+     }
+ }
+diff --git a/lib60870-C/src/inc/api/cs104_slave.h b/lib60870-C/src/inc/api/cs104_slave.h
+index dc4d684..bd27060 100644
+--- a/lib60870-C/src/inc/api/cs104_slave.h
++++ b/lib60870-C/src/inc/api/cs104_slave.h
+@@ -115,7 +115,7 @@ typedef void (*CS104_SlaveRawMessageHandler) (void* parameter, IMasterConnection
+  * \return the new slave instance
+  */
+ CS104_Slave
+-CS104_Slave_create(int maxLowPrioQueueSize, int maxHighPrioQueueSize);
++CS104_Slave_create(int maxConnection, int maxLowPrioQueueSize, int maxHighPrioQueueSize, CS104_APCIParameters apci, pthread_mutex_t *mu);
+ 
+ /**
+  * \brief Create a new instance of a CS104 slave (server) with TLS enabled
+@@ -127,7 +127,7 @@ CS104_Slave_create(int maxLowPrioQueueSize, int maxHighPrioQueueSize);
+  * \return the new slave instance
+  */
+ CS104_Slave
+-CS104_Slave_createSecure(int maxLowPrioQueueSize, int maxHighPrioQueueSize, TLSConfiguration tlsConfig);
++CS104_Slave_createSecure(int maxConnection, int maxLowPrioQueueSize, int maxHighPrioQueueSize, TLSConfiguration tlsConfig);
+ 
+ void
+ CS104_Slave_addPlugin(CS104_Slave self, CS101_SlavePlugin plugin);
+@@ -380,6 +380,26 @@ CS104_RedundancyGroup_addAllowedClientEx(CS104_RedundancyGroup self, uint8_t* ip
+ void
+ CS104_RedundancyGroup_destroy(CS104_RedundancyGroup self);
+ 
++typedef struct sMasterConnection* MasterConnection;
++
++void
++CS104_Slave_masterConnectionHandling(MasterConnection self);
++
++MasterConnection *
++CS104_Slave_getConnections(CS104_Slave self);
++
++int
++CS104_Slave_getMaxConnections(CS104_Slave self);
++
++IMasterConnection
++CS104_Slave_getIMasterConnection(MasterConnection self);
++
++int
++CS104_Slave_getFd(MasterConnection self);
++
++int
++CS104_Slave_doNotStartClientThreads(CS104_Slave self, bool value);
++
+ 
+ /**
+  * @}

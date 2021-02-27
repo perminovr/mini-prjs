@@ -1,0 +1,5 @@
+PREREQ_goose := GooseSub
+PREREQ_H_goose := GooseSub
+
+CFLAGS_goose := -Wall
+LDFLAGS_goose := 

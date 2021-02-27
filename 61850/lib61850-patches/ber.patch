@@ -1,0 +1,75 @@
+diff --git a/src/mms/asn1/ber_integer.c b/src/mms/asn1/ber_integer.c
+index 3678997..e1849c1 100644
+--- a/src/mms/asn1/ber_integer.c
++++ b/src/mms/asn1/ber_integer.c
+@@ -183,6 +183,31 @@ BerInteger_setInt64(Asn1PrimitiveValue* self, int64_t value)
+     return setIntegerValue(self, valueBuffer, sizeof(value));
+ }
+ 
++int
++BerInteger_setUint64(Asn1PrimitiveValue* self, uint64_t value)
++{
++    uint64_t valueCopy = value;
++    uint8_t* valueBuffer = (uint8_t*) &valueCopy;
++
++    uint8_t byteBuffer[9];
++
++    int i;
++
++#if (ORDER_LITTLE_ENDIAN == 1)
++    byteBuffer[8] = 0;
++
++    for (i = 0; i < 8; i++)
++        byteBuffer[i] = valueBuffer[i];
++#else
++    byteBuffer[0] = 0;
++
++    for (i = 0; i < 8; i++)
++        byteBuffer[i + 1] = valueBuffer[i];
++#endif /* (ORDER_LITTLE_ENDIAN == 1) */
++
++    return setIntegerValue(self, byteBuffer, 9);
++}
++
+ Asn1PrimitiveValue*
+ BerInteger_createFromInt64(int64_t value)
+ {
+@@ -192,6 +217,15 @@ BerInteger_createFromInt64(int64_t value)
+     return asn1Value;
+ }
+ 
++Asn1PrimitiveValue*
++BerInteger_createFromUint64(uint64_t value)
++{
++    Asn1PrimitiveValue* asn1Value = BerInteger_createInt64();
++    BerInteger_setUint64(asn1Value, value);
++
++    return asn1Value;
++}
++
+ int /* 1 - if conversion is possible, 0 - out of range */
+ BerInteger_toInt32(Asn1PrimitiveValue* self, int32_t* nativeValue)
+ {
+diff --git a/src/mms/inc_private/ber_integer.h b/src/mms/inc_private/ber_integer.h
+index 0e751bb..376fdd0 100644
+--- a/src/mms/inc_private/ber_integer.h
++++ b/src/mms/inc_private/ber_integer.h
+@@ -54,12 +54,18 @@ BerInteger_setUint16(Asn1PrimitiveValue* self, uint16_t value);
+ LIB61850_INTERNAL int
+ BerInteger_setUint32(Asn1PrimitiveValue* self, uint32_t value);
+ 
++LIB61850_INTERNAL int
++BerInteger_setUint64(Asn1PrimitiveValue* self, uint64_t value);
++
+ LIB61850_INTERNAL Asn1PrimitiveValue*
+ BerInteger_createFromUint32(uint32_t value);
+ 
+ LIB61850_INTERNAL Asn1PrimitiveValue*
+ BerInteger_createFromInt64(int64_t value);
+ 
++LIB61850_INTERNAL Asn1PrimitiveValue*
++BerInteger_createFromUint64(uint64_t value);
++
+ LIB61850_INTERNAL Asn1PrimitiveValue*
+ BerInteger_createInt64(void);
+ 

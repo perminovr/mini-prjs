@@ -1,0 +1,47 @@
+diff --git a/hal/thread/linux/thread_linux.c b/hal/thread/linux/thread_linux.c
+index 488b733..47b8df0 100644
+--- a/hal/thread/linux/thread_linux.c
++++ b/hal/thread/linux/thread_linux.c
+@@ -35,6 +35,7 @@ struct sThread {
+ 	pthread_t pthread;
+ 	int state;
+ 	bool autodestroy;
++	size_t stackSize;
+ };
+ 
+ Semaphore
+@@ -77,6 +78,7 @@ Thread_create(ThreadExecutionFunction function, void* parameter, bool autodestro
+         thread->function = function;
+         thread->state = 0;
+         thread->autodestroy = autodestroy;
++		thread->stackSize = 65535;
+ 	}
+ 
+ 	return thread;
+@@ -97,14 +99,19 @@ destroyAutomaticThread(void* parameter)
+ void
+ Thread_start(Thread thread)
+ {
+-	if (thread->autodestroy == true) {
+-		pthread_create(&thread->pthread, NULL, destroyAutomaticThread, thread);
+-		pthread_detach(thread->pthread);
++	if (thread) {
++		pthread_attr_t attr;
++		pthread_attr_init(&attr);
++		pthread_attr_setstacksize(&attr, thread->stackSize);
++		if (thread->autodestroy == true) {
++			pthread_create(&thread->pthread, &attr, destroyAutomaticThread, thread);
++			pthread_detach(thread->pthread);
++		}
++		else
++			pthread_create(&thread->pthread, &attr, thread->function, thread->parameter);
++
++		thread->state = 1;
+ 	}
+-	else
+-		pthread_create(&thread->pthread, NULL, thread->function, thread->parameter);
+-
+-	thread->state = 1;
+ }
+ 
+ void
